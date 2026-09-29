@@ -110,8 +110,8 @@ Expected: FAIL with `KeyError: 'max_wait'`
 In `generate_music.py`, add to the signature (after `api_key: str = None`):
 
 ```python
-    max_wait: float = 900,
-    poll_interval: float = 5,
+max_wait: float = (900,)
+poll_interval: float = (5,)
 ```
 
 and replace the two local assignments (`max_wait = 300  # 5 minutes (matching frontend)` and `poll_interval = 5`) with uses of the parameters. Update the docstring:
@@ -381,7 +381,9 @@ def test_require_credentials_message_names_both_variables():
 
 
 def test_credentials_present_passes():
-    Settings(user_id="u", api_key="k", results_dir=Path("/tmp"), api_base_url=None, job_timeout_s=1).require_credentials()
+    Settings(
+        user_id="u", api_key="k", results_dir=Path("/tmp"), api_base_url=None, job_timeout_s=1
+    ).require_credentials()
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -440,7 +442,9 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
             f"AUDIAL_JOB_TIMEOUT_S must be a positive integer number of seconds, got {raw_timeout!r}"
         ) from None
 
-    results_dir = Path(os.path.expandvars(env.get("AUDIAL_RESULTS_DIR") or DEFAULT_RESULTS_DIR)).expanduser()
+    results_dir = Path(
+        os.path.expandvars(env.get("AUDIAL_RESULTS_DIR") or DEFAULT_RESULTS_DIR)
+    ).expanduser()
 
     return Settings(
         user_id=(env.get("AUDIAL_USER_ID") or "").strip() or None,
@@ -582,10 +586,16 @@ def inventory(folder: Path) -> list[FileInfo]:
         return []
     files: list[FileInfo] = []
     for path in sorted(folder.rglob("*")):
-        if not path.is_file() or any(part.startswith(".") for part in path.relative_to(folder).parts):
+        if not path.is_file() or any(
+            part.startswith(".") for part in path.relative_to(folder).parts
+        ):
             continue
         files.append(
-            FileInfo(name=path.relative_to(folder).as_posix(), path=str(path.resolve()), size_bytes=path.stat().st_size)
+            FileInfo(
+                name=path.relative_to(folder).as_posix(),
+                path=str(path.resolve()),
+                size_bytes=path.stat().st_size,
+            )
         )
     return files
 
@@ -894,7 +904,10 @@ from audial_mcp.validation import ValidationError
 
 
 def test_subscription_error_keeps_api_text():
-    err = to_tool_error(SubscriptionRequiredError("This feature needs an active Audial subscription."), tool="sound2vital")
+    err = to_tool_error(
+        SubscriptionRequiredError("This feature needs an active Audial subscription."),
+        tool="sound2vital",
+    )
     assert isinstance(err, ToolError) and "subscription" in str(err)
 
 
@@ -1000,14 +1013,28 @@ import audial_mcp.server as server_mod
 from audial_mcp.config import Settings
 
 TOOLS = {
-    "stem_split", "analyze", "segment", "master", "generate_samples",
-    "generate_midi", "generate_music", "sound2vital", "text2vox", "list_results",
+    "stem_split",
+    "analyze",
+    "segment",
+    "master",
+    "generate_samples",
+    "generate_midi",
+    "generate_music",
+    "sound2vital",
+    "text2vox",
+    "list_results",
 }
 
 
 @pytest.fixture
 def settings(tmp_path, monkeypatch):
-    s = Settings(user_id="u1", api_key="k1", results_dir=tmp_path / "Audial", api_base_url=None, job_timeout_s=5)
+    s = Settings(
+        user_id="u1",
+        api_key="k1",
+        results_dir=tmp_path / "Audial",
+        api_base_url=None,
+        job_timeout_s=5,
+    )
     monkeypatch.setattr(server_mod, "_settings", s)
     return s
 
@@ -1034,7 +1061,11 @@ def fake_sdk(monkeypatch, name, *, produce=("vocals.wav",), returns=None, calls=
         for fname in produce:
             (folder / fname).write_bytes(b"0")
         print("SDK progress line that must not corrupt the protocol")
-        return returns if returns is not None else {"execution": {"exeId": "-P2h", "state": "completed"}}
+        return (
+            returns
+            if returns is not None
+            else {"execution": {"exeId": "-P2h", "state": "completed"}}
+        )
 
     monkeypatch.setattr(server_mod.audial, name, fn)
     return calls
@@ -1064,7 +1095,9 @@ async def test_stem_split_maps_args_and_inventories_output(client, settings, wav
 
 @pytest.mark.anyio
 async def test_missing_credentials_is_a_readable_error(client, monkeypatch, wav, settings):
-    monkeypatch.setattr(server_mod, "_settings", Settings(None, None, settings.results_dir, None, 5))
+    monkeypatch.setattr(
+        server_mod, "_settings", Settings(None, None, settings.results_dir, None, 5)
+    )
     result = await client.call_tool("analyze", {"file_path": str(wav)})
     assert result.is_error and "AUDIAL_API_KEY" in result.content[0].text
 
@@ -1077,9 +1110,15 @@ async def test_bad_path_is_a_readable_error(client):
 
 @pytest.mark.anyio
 async def test_generate_music_uses_prompt_slug_and_no_file(client, settings, monkeypatch):
-    calls = fake_sdk(monkeypatch, "generate_music", produce=("song.mp3",),
-                     returns={"execution": {"exeId": "-P2m", "generation_metadata": {"bpm": 96}}})
-    result = await client.call_tool("generate_music", {"prompt": "upbeat country shuffle", "audio_duration": 30})
+    calls = fake_sdk(
+        monkeypatch,
+        "generate_music",
+        produce=("song.mp3",),
+        returns={"execution": {"exeId": "-P2m", "generation_metadata": {"bpm": 96}}},
+    )
+    result = await client.call_tool(
+        "generate_music", {"prompt": "upbeat country shuffle", "audio_duration": 30}
+    )
     data = result.structured_content
     assert Path(data["output_dir"]).name.endswith("_upbeat_country_shuffle")
     assert data["metadata"]["execution"]["generation_metadata"]["bpm"] == 96
@@ -1088,10 +1127,14 @@ async def test_generate_music_uses_prompt_slug_and_no_file(client, settings, mon
 
 @pytest.mark.anyio
 async def test_text2vox_validates_reference_and_midi(client, tmp_path, monkeypatch):
-    ref = tmp_path / "voice.wav"; ref.write_bytes(b"0")
-    mid = tmp_path / "melody.mid"; mid.write_bytes(b"0")
+    ref = tmp_path / "voice.wav"
+    ref.write_bytes(b"0")
+    mid = tmp_path / "melody.mid"
+    mid.write_bytes(b"0")
     calls = fake_sdk(monkeypatch, "text2vox", produce=("song.wav", "song.mid"))
-    result = await client.call_tool("text2vox", {"reference_file": str(ref), "lyrics": "la la", "midi_file": str(mid)})
+    result = await client.call_tool(
+        "text2vox", {"reference_file": str(ref), "lyrics": "la la", "midi_file": str(mid)}
+    )
     assert not result.is_error and calls[0][1]["midi_file"] == str(mid.resolve())
 
 
@@ -1214,24 +1257,49 @@ async def _execute(ctx: Context, tool: str, slug: str, call: Callable[[Path], An
         raise to_tool_error(exc, tool=tool, execution_id=execution_id) from None
 
 
-FilePath = Annotated[str, Field(description="Full path to a local audio file (.wav, .mp3, .aif, .aiff, .flac, .m4a, .ogg, .aac). ~ is expanded.")]
+FilePath = Annotated[
+    str,
+    Field(
+        description="Full path to a local audio file (.wav, .mp3, .aif, .aiff, .flac, .m4a, .ogg, .aac). ~ is expanded."
+    ),
+]
 
 
 @mcp.tool(title="Split stems", annotations=REMOTE)
 async def stem_split(
     ctx: Context,
     file_path: FilePath,
-    stems: Annotated[list[str] | None, Field(description="Stems to extract from: vocals, drums, bass, other, full_song_without_vocals. Default: vocals, drums, bass, other.")] = None,
-    target_bpm: Annotated[float | None, Field(description="Retime the stems to this tempo (beats per minute).")] = None,
-    target_key: Annotated[str | None, Field(description="Transpose the stems to this key, e.g. 'A minor' or 'F# major'.")] = None,
-    algorithm: Annotated[str, Field(description="Separation algorithm. Default 'primaudio'.")] = "primaudio",
+    stems: Annotated[
+        list[str] | None,
+        Field(
+            description="Stems to extract from: vocals, drums, bass, other, full_song_without_vocals. Default: vocals, drums, bass, other."
+        ),
+    ] = None,
+    target_bpm: Annotated[
+        float | None, Field(description="Retime the stems to this tempo (beats per minute).")
+    ] = None,
+    target_key: Annotated[
+        str | None,
+        Field(description="Transpose the stems to this key, e.g. 'A minor' or 'F# major'."),
+    ] = None,
+    algorithm: Annotated[
+        str, Field(description="Separation algorithm. Default 'primaudio'.")
+    ] = "primaudio",
 ) -> JobResult:
     """Split a track into separate instrument stems, optionally retimed and rekeyed."""
     src = check_file(file_path, AUDIO_EXTENSIONS, "audio file")
     return await _execute(
-        ctx, "stem_split", slugify(src.stem),
-        lambda out: audial.stem_split(file_path=str(src), stems=stems, target_bpm=target_bpm,
-                                      target_key=target_key, algorithm=algorithm, results_folder=str(out)),
+        ctx,
+        "stem_split",
+        slugify(src.stem),
+        lambda out: audial.stem_split(
+            file_path=str(src),
+            stems=stems,
+            target_bpm=target_bpm,
+            target_key=target_key,
+            algorithm=algorithm,
+            results_folder=str(out),
+        ),
     )
 
 
@@ -1239,25 +1307,45 @@ async def stem_split(
 async def analyze(ctx: Context, file_path: FilePath) -> JobResult:
     """Analyze a track: BPM, key, loudness and other characteristics. Results are in `metadata`."""
     src = check_file(file_path, AUDIO_EXTENSIONS, "audio file")
-    return await _execute(ctx, "analyze", slugify(src.stem),
-                          lambda out: audial.analyze(file_path=str(src), results_folder=str(out)))
+    return await _execute(
+        ctx,
+        "analyze",
+        slugify(src.stem),
+        lambda out: audial.analyze(file_path=str(src), results_folder=str(out)),
+    )
 
 
 @mcp.tool(title="Segment audio", annotations=REMOTE)
 async def segment(
     ctx: Context,
     file_path: FilePath,
-    components: Annotated[list[str] | None, Field(description="Components to analyze, e.g. ['vocals', 'drums'].")] = None,
-    analysis_type: Annotated[str | None, Field(description="Analysis type accepted by Audial's segmentation.")] = None,
-    features: Annotated[list[str] | None, Field(description="Features to compute per segment.")] = None,
-    genre: Annotated[str | None, Field(description="Genre hint that improves section detection.")] = None,
+    components: Annotated[
+        list[str] | None, Field(description="Components to analyze, e.g. ['vocals', 'drums'].")
+    ] = None,
+    analysis_type: Annotated[
+        str | None, Field(description="Analysis type accepted by Audial's segmentation.")
+    ] = None,
+    features: Annotated[
+        list[str] | None, Field(description="Features to compute per segment.")
+    ] = None,
+    genre: Annotated[
+        str | None, Field(description="Genre hint that improves section detection.")
+    ] = None,
 ) -> JobResult:
     """Detect song sections (intro, verse, chorus…) and analyze components within them."""
     src = check_file(file_path, AUDIO_EXTENSIONS, "audio file")
     return await _execute(
-        ctx, "segment", slugify(src.stem),
-        lambda out: audial.segment(file_path=str(src), components=components, analysis_type=analysis_type,
-                                   features=features, genre=genre, results_folder=str(out)),
+        ctx,
+        "segment",
+        slugify(src.stem),
+        lambda out: audial.segment(
+            file_path=str(src),
+            components=components,
+            analysis_type=analysis_type,
+            features=features,
+            genre=genre,
+            results_folder=str(out),
+        ),
     )
 
 
@@ -1265,14 +1353,27 @@ async def segment(
 async def master(
     ctx: Context,
     file_path: FilePath,
-    reference_file: Annotated[str | None, Field(description="Optional reference track whose loudness and tone the master should match.")] = None,
+    reference_file: Annotated[
+        str | None,
+        Field(
+            description="Optional reference track whose loudness and tone the master should match."
+        ),
+    ] = None,
 ) -> JobResult:
     """Master a mix, optionally matching a reference track."""
     src = check_file(file_path, AUDIO_EXTENSIONS, "audio file")
-    ref = check_file(reference_file, AUDIO_EXTENSIONS, "reference audio file") if reference_file else None
+    ref = (
+        check_file(reference_file, AUDIO_EXTENSIONS, "reference audio file")
+        if reference_file
+        else None
+    )
     return await _execute(
-        ctx, "master", slugify(src.stem),
-        lambda out: audial.master(file_path=str(src), reference_file=str(ref) if ref else None, results_folder=str(out)),
+        ctx,
+        "master",
+        slugify(src.stem),
+        lambda out: audial.master(
+            file_path=str(src), reference_file=str(ref) if ref else None, results_folder=str(out)
+        ),
     )
 
 
@@ -1280,16 +1381,30 @@ async def master(
 async def generate_samples(
     ctx: Context,
     file_path: FilePath,
-    job_type: Annotated[str | None, Field(description="Sample pack job type accepted by Audial (default engine choice when omitted).")] = None,
-    components: Annotated[list[str] | None, Field(description="Which components to sample, e.g. ['drums', 'bass'].")] = None,
+    job_type: Annotated[
+        str | None,
+        Field(
+            description="Sample pack job type accepted by Audial (default engine choice when omitted)."
+        ),
+    ] = None,
+    components: Annotated[
+        list[str] | None, Field(description="Which components to sample, e.g. ['drums', 'bass'].")
+    ] = None,
     genre: Annotated[str | None, Field(description="Genre hint.")] = None,
 ) -> JobResult:
     """Extract a sample pack (one-shots and loops) from a track."""
     src = check_file(file_path, AUDIO_EXTENSIONS, "audio file")
     return await _execute(
-        ctx, "generate_samples", slugify(src.stem),
-        lambda out: audial.generate_samples(file_path=str(src), job_type=job_type, components=components,
-                                            genre=genre, results_folder=str(out)),
+        ctx,
+        "generate_samples",
+        slugify(src.stem),
+        lambda out: audial.generate_samples(
+            file_path=str(src),
+            job_type=job_type,
+            components=components,
+            genre=genre,
+            results_folder=str(out),
+        ),
     )
 
 
@@ -1297,54 +1412,118 @@ async def generate_samples(
 async def generate_midi(
     ctx: Context,
     file_path: FilePath,
-    bpm: Annotated[float | None, Field(description="Override the detected tempo for note quantisation.")] = None,
+    bpm: Annotated[
+        float | None, Field(description="Override the detected tempo for note quantisation.")
+    ] = None,
 ) -> JobResult:
     """Transcribe an audio file to MIDI."""
     src = check_file(file_path, AUDIO_EXTENSIONS, "audio file")
     return await _execute(
-        ctx, "generate_midi", slugify(src.stem),
-        lambda out: audial.generate_midi(file_path=str(src), bpm=bpm, results_folder=str(out),
-                                         max_wait=_settings.job_timeout_s),
+        ctx,
+        "generate_midi",
+        slugify(src.stem),
+        lambda out: audial.generate_midi(
+            file_path=str(src), bpm=bpm, results_folder=str(out), max_wait=_settings.job_timeout_s
+        ),
     )
 
 
 @mcp.tool(title="Generate music", annotations=REMOTE)
 async def generate_music(
     ctx: Context,
-    prompt: Annotated[str, Field(description="Style description: genre, mood, instruments, vocal character. Tempo and key words in the prompt steer the model more than the numeric bpm/key fields, which are hints, not constraints.")],
-    task_type: Annotated[str, Field(description="text2music (default), cover, remix, extract, lego, complete, or understand.")] = "text2music",
-    lyrics: Annotated[str | None, Field(description="Lyrics with optional section tags like [Verse] and [Chorus]. Omit for instrumental.")] = None,
-    source_file: Annotated[str | None, Field(description="Local audio file; required for remix, extract, lego, complete, understand.")] = None,
-    reference_file: Annotated[str | None, Field(description="Local audio file; required for cover.")] = None,
+    prompt: Annotated[
+        str,
+        Field(
+            description="Style description: genre, mood, instruments, vocal character. Tempo and key words in the prompt steer the model more than the numeric bpm/key fields, which are hints, not constraints."
+        ),
+    ],
+    task_type: Annotated[
+        str,
+        Field(
+            description="text2music (default), cover, remix, extract, lego, complete, or understand."
+        ),
+    ] = "text2music",
+    lyrics: Annotated[
+        str | None,
+        Field(
+            description="Lyrics with optional section tags like [Verse] and [Chorus]. Omit for instrumental."
+        ),
+    ] = None,
+    source_file: Annotated[
+        str | None,
+        Field(
+            description="Local audio file; required for remix, extract, lego, complete, understand."
+        ),
+    ] = None,
+    reference_file: Annotated[
+        str | None, Field(description="Local audio file; required for cover.")
+    ] = None,
     bpm: Annotated[int | None, Field(description="Tempo hint in beats per minute.")] = None,
     key_scale: Annotated[str | None, Field(description="Key hint, e.g. 'G major'.")] = None,
     time_signature: Annotated[str | None, Field(description="e.g. '4/4'.")] = None,
-    audio_duration: Annotated[float | None, Field(description="Length in seconds (10–600).")] = None,
-    vocal_language: Annotated[str, Field(description="Language code for vocals, e.g. 'en'.")] = "en",
-    audio_cover_strength: Annotated[float | None, Field(description="0–1 fidelity to the original for cover/remix.")] = None,
-    repainting_start: Annotated[float | None, Field(description="Remix start time in seconds.")] = None,
-    repainting_end: Annotated[float | None, Field(description="Remix end time in seconds (-1 = end).")] = None,
+    audio_duration: Annotated[
+        float | None, Field(description="Length in seconds (10–600).")
+    ] = None,
+    vocal_language: Annotated[
+        str, Field(description="Language code for vocals, e.g. 'en'.")
+    ] = "en",
+    audio_cover_strength: Annotated[
+        float | None, Field(description="0–1 fidelity to the original for cover/remix.")
+    ] = None,
+    repainting_start: Annotated[
+        float | None, Field(description="Remix start time in seconds.")
+    ] = None,
+    repainting_end: Annotated[
+        float | None, Field(description="Remix end time in seconds (-1 = end).")
+    ] = None,
     batch_size: Annotated[int, Field(description="Number of variations, 1–8.")] = 1,
     seed: Annotated[int | None, Field(description="Seed for reproducible output.")] = None,
     audio_format: Annotated[str, Field(description="mp3, wav, flac, opus or aac.")] = "mp3",
-    track_name: Annotated[str | None, Field(description="Track to extract/replace for extract/lego: vocals, drums, bass, guitar, piano, strings, synth, other.")] = None,
+    track_name: Annotated[
+        str | None,
+        Field(
+            description="Track to extract/replace for extract/lego: vocals, drums, bass, guitar, piano, strings, synth, other."
+        ),
+    ] = None,
     instrumental: Annotated[bool, Field(description="Generate without vocals.")] = False,
-    negative_prompt: Annotated[str | None, Field(description="What to avoid, comma-separated.")] = None,
+    negative_prompt: Annotated[
+        str | None, Field(description="What to avoid, comma-separated.")
+    ] = None,
 ) -> JobResult:
     """Generate music with the Audial music model: text to music, covers, remixes, stem extraction, completion, or analysis (understand)."""
     src = check_file(source_file, AUDIO_EXTENSIONS, "source audio file") if source_file else None
-    ref = check_file(reference_file, AUDIO_EXTENSIONS, "reference audio file") if reference_file else None
+    ref = (
+        check_file(reference_file, AUDIO_EXTENSIONS, "reference audio file")
+        if reference_file
+        else None
+    )
     slug = slugify("_".join(prompt.split()[:3]), fallback="music")
     return await _execute(
-        ctx, "generate_music", slug,
+        ctx,
+        "generate_music",
+        slug,
         lambda out: audial.generate_music(
-            prompt=prompt, task_type=task_type, lyrics=lyrics,
-            source_file=str(src) if src else None, reference_file=str(ref) if ref else None,
-            bpm=bpm, key_scale=key_scale, time_signature=time_signature, audio_duration=audio_duration,
-            vocal_language=vocal_language, audio_cover_strength=audio_cover_strength,
-            repainting_start=repainting_start, repainting_end=repainting_end, batch_size=batch_size,
-            seed=seed, audio_format=audio_format, track_name=track_name, instrumental=instrumental,
-            negative_prompt=negative_prompt, results_folder=str(out), max_wait=_settings.job_timeout_s,
+            prompt=prompt,
+            task_type=task_type,
+            lyrics=lyrics,
+            source_file=str(src) if src else None,
+            reference_file=str(ref) if ref else None,
+            bpm=bpm,
+            key_scale=key_scale,
+            time_signature=time_signature,
+            audio_duration=audio_duration,
+            vocal_language=vocal_language,
+            audio_cover_strength=audio_cover_strength,
+            repainting_start=repainting_start,
+            repainting_end=repainting_end,
+            batch_size=batch_size,
+            seed=seed,
+            audio_format=audio_format,
+            track_name=track_name,
+            instrumental=instrumental,
+            negative_prompt=negative_prompt,
+            results_folder=str(out),
+            max_wait=_settings.job_timeout_s,
         ),
     )
 
@@ -1352,49 +1531,100 @@ async def generate_music(
 @mcp.tool(title="Resynthesize a one-shot into a synth preset", annotations=REMOTE)
 async def sound2vital(
     ctx: Context,
-    file_path: Annotated[str, Field(description="A short one-shot (≤ 20 s) audio file. The result is an editable Audial Synth (.vital) preset that reproduces its timbre.")],
+    file_path: Annotated[
+        str,
+        Field(
+            description="A short one-shot (≤ 20 s) audio file. The result is an editable Audial Synth (.vital) preset that reproduces its timbre."
+        ),
+    ],
 ) -> JobResult:
     """Turn a one-shot sample into an editable Audial Synth preset (requires an Audial subscription)."""
     src = check_file(file_path, AUDIO_EXTENSIONS, "audio file")
     return await _execute(
-        ctx, "sound2vital", slugify(src.stem),
-        lambda out: audial.sound2vital(file_path=str(src), results_folder=str(out), max_wait=_settings.job_timeout_s),
+        ctx,
+        "sound2vital",
+        slugify(src.stem),
+        lambda out: audial.sound2vital(
+            file_path=str(src), results_folder=str(out), max_wait=_settings.job_timeout_s
+        ),
     )
 
 
 @mcp.tool(title="Sing lyrics in a reference voice", annotations=REMOTE)
 async def text2vox(
     ctx: Context,
-    reference_file: Annotated[str, Field(description="Short clip of the reference voice (timbre).")],
+    reference_file: Annotated[
+        str, Field(description="Short clip of the reference voice (timbre).")
+    ],
     lyrics: Annotated[str, Field(description="Lyrics to sing.")],
-    midi_file: Annotated[str | None, Field(description="MIDI melody (.mid). Give this or melody_audio_file.")] = None,
-    melody_audio_file: Annotated[str | None, Field(description="Audio whose melody is transcribed and followed, if no MIDI.")] = None,
-    word_timestamps_file: Annotated[str | None, Field(description="Optional JSON word timings.")] = None,
-    lyrics_mode: Annotated[str, Field(description="auto (default) or an explicit lyric alignment mode.")] = "auto",
-    reference_text: Annotated[str | None, Field(description="Transcript of the reference clip, if known.")] = None,
+    midi_file: Annotated[
+        str | None, Field(description="MIDI melody (.mid). Give this or melody_audio_file.")
+    ] = None,
+    melody_audio_file: Annotated[
+        str | None, Field(description="Audio whose melody is transcribed and followed, if no MIDI.")
+    ] = None,
+    word_timestamps_file: Annotated[
+        str | None, Field(description="Optional JSON word timings.")
+    ] = None,
+    lyrics_mode: Annotated[
+        str, Field(description="auto (default) or an explicit lyric alignment mode.")
+    ] = "auto",
+    reference_text: Annotated[
+        str | None, Field(description="Transcript of the reference clip, if known.")
+    ] = None,
     cfg_strength: Annotated[float | None, Field(description="Guidance strength.")] = None,
-    nfe_steps: Annotated[int | None, Field(description="Synthesis steps; more is slower and cleaner.")] = None,
-    pitch_shift: Annotated[float | None, Field(description="Semitones to shift the melody.")] = None,
-    strict_pitch: Annotated[bool | None, Field(description="Force exact pitch to the melody.")] = None,
-    bend_smoothing_ms: Annotated[float | None, Field(description="Pitch-bend smoothing window in ms.")] = None,
+    nfe_steps: Annotated[
+        int | None, Field(description="Synthesis steps; more is slower and cleaner.")
+    ] = None,
+    pitch_shift: Annotated[
+        float | None, Field(description="Semitones to shift the melody.")
+    ] = None,
+    strict_pitch: Annotated[
+        bool | None, Field(description="Force exact pitch to the melody.")
+    ] = None,
+    bend_smoothing_ms: Annotated[
+        float | None, Field(description="Pitch-bend smoothing window in ms.")
+    ] = None,
     no_pitch_bends: Annotated[bool | None, Field(description="Disable pitch bends.")] = None,
-    leading_silence_s: Annotated[float | None, Field(description="Silence before the first note, seconds.")] = None,
+    leading_silence_s: Annotated[
+        float | None, Field(description="Silence before the first note, seconds.")
+    ] = None,
     seed: Annotated[int | None, Field(description="Seed for reproducible output.")] = None,
 ) -> JobResult:
     """Synthesize a sung vocal (and MIDI) from lyrics, a melody and a reference voice (requires an Audial subscription)."""
     ref = check_file(reference_file, AUDIO_EXTENSIONS, "reference audio file")
     mid = check_file(midi_file, MIDI_EXTENSIONS, "MIDI file") if midi_file else None
-    mel = check_file(melody_audio_file, AUDIO_EXTENSIONS, "melody audio file") if melody_audio_file else None
-    wts = check_file(word_timestamps_file, JSON_EXTENSIONS, "word timestamps JSON file") if word_timestamps_file else None
+    mel = (
+        check_file(melody_audio_file, AUDIO_EXTENSIONS, "melody audio file")
+        if melody_audio_file
+        else None
+    )
+    wts = (
+        check_file(word_timestamps_file, JSON_EXTENSIONS, "word timestamps JSON file")
+        if word_timestamps_file
+        else None
+    )
     return await _execute(
-        ctx, "text2vox", slugify(ref.stem),
+        ctx,
+        "text2vox",
+        slugify(ref.stem),
         lambda out: audial.text2vox(
-            reference_file=str(ref), lyrics=lyrics, midi_file=str(mid) if mid else None,
-            melody_audio_file=str(mel) if mel else None, word_timestamps_file=str(wts) if wts else None,
-            lyrics_mode=lyrics_mode, reference_text=reference_text, cfg_strength=cfg_strength,
-            nfe_steps=nfe_steps, pitch_shift=pitch_shift, strict_pitch=strict_pitch,
-            bend_smoothing_ms=bend_smoothing_ms, no_pitch_bends=no_pitch_bends,
-            leading_silence_s=leading_silence_s, seed=seed, results_folder=str(out),
+            reference_file=str(ref),
+            lyrics=lyrics,
+            midi_file=str(mid) if mid else None,
+            melody_audio_file=str(mel) if mel else None,
+            word_timestamps_file=str(wts) if wts else None,
+            lyrics_mode=lyrics_mode,
+            reference_text=reference_text,
+            cfg_strength=cfg_strength,
+            nfe_steps=nfe_steps,
+            pitch_shift=pitch_shift,
+            strict_pitch=strict_pitch,
+            bend_smoothing_ms=bend_smoothing_ms,
+            no_pitch_bends=no_pitch_bends,
+            leading_silence_s=leading_silence_s,
+            seed=seed,
+            results_folder=str(out),
             max_wait=_settings.job_timeout_s,
         ),
     )
@@ -1402,19 +1632,29 @@ async def text2vox(
 
 @mcp.tool(title="List previous results", annotations=LOCAL_READ_ONLY)
 async def list_results(
-    tool: Annotated[str | None, Field(description="Filter by tool name, e.g. 'stem_split'. Omit for all tools.")] = None,
-    limit: Annotated[int, Field(description="Maximum number of jobs to return, newest first.", ge=1, le=100)] = 10,
+    tool: Annotated[
+        str | None, Field(description="Filter by tool name, e.g. 'stem_split'. Omit for all tools.")
+    ] = None,
+    limit: Annotated[
+        int, Field(description="Maximum number of jobs to return, newest first.", ge=1, le=100)
+    ] = 10,
 ) -> list[JobResult]:
     """List previous Audial results in the results folder, newest first."""
     return list_jobs(_settings.results_dir, tool, limit)
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, stream=sys.stderr, format="%(levelname)s %(name)s: %(message)s"
+    )
     global _settings
     _settings = load_settings()
-    log.info("audial-mcp %s; results dir %s; credentials %s", __version__, _settings.results_dir,
-             "present" if _settings.user_id and _settings.api_key else "MISSING")
+    log.info(
+        "audial-mcp %s; results dir %s; credentials %s",
+        __version__,
+        _settings.results_dir,
+        "present" if _settings.user_id and _settings.api_key else "MISSING",
+    )
     mcp.run()  # stdio
 
 
