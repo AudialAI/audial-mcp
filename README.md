@@ -63,7 +63,7 @@ Two other files are *read* if they exist, because the Audial SDK looks for them:
 Credentials from your MCP client's config always win: `audial-mcp` snapshots its environment
 before the SDK loads either file, so neither can redirect your credentials or the API host.
 
-Some tools require an active Audial subscription; the tool tells you when that is the case.
+Every tool except `list_results` calls the Audial API, which requires an active Audial subscription on the account; without one the tool returns the API's subscription message.
 
 ## Configuration
 

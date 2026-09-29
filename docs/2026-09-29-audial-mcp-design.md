@@ -92,7 +92,7 @@ that explains itself is fixable from the conversation.
 
 ## 6. Tools
 
-Names mirror the SDK so the API docs, SDK docs and MCP docs agree.
+Names mirror the SDK so the API docs, SDK docs and MCP docs agree. Every tool except `list_results` calls the Audial API, which requires an active subscription (2026-09-29: the API gates every function).
 
 | Tool | Wraps | Inputs (beyond `file_path`) | Notes |
 |---|---|---|---|
@@ -103,8 +103,8 @@ Names mirror the SDK so the API docs, SDK docs and MCP docs agree.
 | `generate_samples` | `audial.generate_samples` | `job_type`, `components`, `genre` | |
 | `generate_midi` | `audial.generate_midi` | `bpm` | one file per call in v0.1 |
 | `generate_music` | `audial.generate_music` | `prompt`, `task_type`, `lyrics`, `source_file`, `reference_file`, `bpm`, `key_scale`, `time_signature`, `audio_duration`, `vocal_language`, `audio_cover_strength`, `repainting_start/end`, `batch_size`, `seed`, `audio_format`, `track_name`, `instrumental`, `negative_prompt` | no `file_path`; `understand` mode returns caption in metadata |
-| `sound2vital` | `audial.sound2vital` | – | returns a `.vital` preset; subscription-gated |
-| `text2vox` | `audial.text2vox` | `reference_file`, `lyrics`, `midi_file`, `melody_audio_file`, `word_timestamps_file`, `lyrics_mode`, `reference_text`, `cfg_strength`, `nfe_steps`, `pitch_shift`, `strict_pitch`, `bend_smoothing_ms`, `no_pitch_bends`, `leading_silence_s`, `seed` | subscription-gated |
+| `sound2vital` | `audial.sound2vital` | – | returns a `.vital` preset |
+| `text2vox` | `audial.text2vox` | `reference_file`, `lyrics`, `midi_file`, `melody_audio_file`, `word_timestamps_file`, `lyrics_mode`, `reference_text`, `cfg_strength`, `nfe_steps`, `pitch_shift`, `strict_pitch`, `bend_smoothing_ms`, `no_pitch_bends`, `leading_silence_s`, `seed` | |
 | `list_results` | local | `tool` (optional), `limit` | read-only; newest first |
 
 Every processing tool returns the same structured object (also serialised as text for the

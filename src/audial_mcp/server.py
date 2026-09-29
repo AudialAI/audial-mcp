@@ -39,7 +39,8 @@ INSTRUCTIONS = (
     "the user's Audial results folder and returned as file paths; tell the user where they are. "
     "Jobs take from a few seconds (analyze) to a few minutes (stem_split, generate_music, "
     "sound2vital, text2vox); progress notifications report elapsed time. Some tools need an "
-    "active Audial subscription; relay the error text if one is returned."
+    "active Audial subscription for every tool except list_results; relay the error text if "
+    "one is returned."
 )
 
 mcp = MCPServer("audial", instructions=INSTRUCTIONS, version=__version__)
@@ -547,7 +548,6 @@ async def sound2vital(
 ) -> JobResult:
     """Turn a one-shot sample into an editable Audial Synth preset.
 
-    Requires an Audial subscription.
     """
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
@@ -615,7 +615,6 @@ async def text2vox(
 ) -> JobResult:
     """Synthesize a sung vocal (and MIDI) from lyrics, a melody and a reference voice.
 
-    Requires an Audial subscription.
     """
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
