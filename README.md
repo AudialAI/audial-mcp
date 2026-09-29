@@ -56,8 +56,14 @@ claude mcp add audial \
 
 Audio and text you pass to a tool are uploaded to Audial's API (https://api.audialmusic.ai)
 over HTTPS and processed on Audial's servers; results are downloaded into
-`AUDIAL_RESULTS_DIR` (default `~/Audial`). Nothing else is read or sent. Some tools require
-an active Audial subscription; the tool tells you when that is the case.
+`AUDIAL_RESULTS_DIR` (default `~/Audial`). Nothing else is sent.
+
+Two other files are *read* if they exist, because the Audial SDK looks for them:
+`~/.audial/.audial_config.json` and a `.env` in the directory the server was started from.
+Credentials from your MCP client's config always win: `audial-mcp` snapshots its environment
+before the SDK loads either file, so neither can redirect your credentials or the API host.
+
+Some tools require an active Audial subscription; the tool tells you when that is the case.
 
 ## Configuration
 

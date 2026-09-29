@@ -60,7 +60,7 @@ MCP client ──stdio──▶ audial-mcp (Python, mcp>=2.2 MCPServer)
                         │               heartbeat progress, hard timeout
                         ├── results.py  job folder naming, inventory, list_results
                         └── audial-sdk  upload → run → poll → download (unchanged)
-                                 └── Audial API (api.audialmusic.ai) → RunPod engines
+                                 └── Audial API (api.audialmusic.ai) → hosted GPU workers
 ```
 
 - **Runtime:** Python ≥ 3.10 (mcp requires it), `mcp>=2.2,<3`, `audial-sdk>=1.2.2`.
@@ -156,6 +156,8 @@ worker), sound2vital ~1.5 min, text2vox 1–2 min.
   returns a `ToolError` with the execution id when known (the hosted job keeps running;
   `list_results` will not see it, so the message says to retry later or check the
   dashboard). Python threads cannot be killed; the orphaned thread finishes quietly.
+  That thread is non-daemon, so after a timeout the process exits only once the abandoned
+  SDK call returns or the client terminates the server.
 - **SDK dependency:** `generate_music` and `generate_midi` currently hard-code their own
   5-minute waits, which is shorter than a cold-start generation. SDK 1.2.2 adds
   `max_wait` parameters (default 900) so the server's timeout is the only one that matters.

@@ -1,7 +1,7 @@
 # Manual e2e checklist — audial-mcp
 
-Date: 2026-09-29. Environment: dev API (`AUDIAL_API_BASE_URL=$AUDIAL_API_DEV/api`), smoke
-account (`SMOKE_USER_ID` / `SMOKE_USER_API_KEY` from `genetic_vital/.env`),
+Date: 2026-09-29. Environment: the dev API (`AUDIAL_API_BASE_URL` pointed at it), the dev
+smoke account credentials,
 `AUDIAL_RESULTS_DIR=/tmp/audial-e2e`, `AUDIAL_JOB_TIMEOUT_S=1500`.
 
 **Method note (controller ruling on this task):** the brief's "Inspector" section assumes a
@@ -26,13 +26,13 @@ deleted after the run, see "Cleanup" at the bottom).
   upload succeeds, `create_execution` succeeds (execution ids `-P2hpB7GckSe2RMsf-ue` on
   `song30s.wav` and `-P2hpEMgNcJQmOFgqpqw` on `voice.wav`), and the POST to
   `/functions/run/primary-analysis` returns **HTTP 500 with body `Request failed with status
-  code 409`**. Tracing that into `AudialAPI/Audial-API/src/lib/functions/primary-analysis/
-  RouteHandler.ts`, the 409 originates from the backend's call to the RunPod primary-analysis
-  endpoint — a cold-start/worker conflict on the dev RunPod deployment, not something
-  `audial-mcp` or the SDK sent wrong (same error reproduces calling the proxy directly with no
-  `audial-mcp` code in the path at all). Retried a fourth time ~5 minutes later (11:47:55); same
-  500. **No `audial-mcp` fix applies here** — nothing to change in this repo; this is a dev
-  RunPod/API-side outage. Recorded, not fixed, per task instructions.
+  code 409`**. Tracing that into the API's primary-analysis route, the 409 originates from
+  the backend's call to Audial's hosted GPU workers for primary analysis — a cold-start/worker
+  conflict on the dev deployment, not something `audial-mcp` or the SDK sent wrong (same error
+  reproduces calling the proxy directly with no `audial-mcp` code in the path at all). Retried
+  a fourth time ~5 minutes later (11:47:55); same 500. **No `audial-mcp` fix applies here** —
+  nothing to change in this repo; this is a dev API-side outage. Recorded, not fixed, per task
+  instructions.
 
 - [ ] **3. `stem_split`** on `song30s.wav`, `stems=["vocals","drums"]` — **FAILED (remote, same
   root cause as #2).** `stem_split` also runs `primary-analysis` first (see
@@ -58,7 +58,7 @@ deleted after the run, see "Cleanup" at the bottom).
   `lyrics="down by the river where the water runs slow"`, `midi_file=melody.mid` — **FAILED
   twice (remote, dev GPU resource exhaustion).** Attempt 1: execution `-P2hpdaNWIoqDHlG3wE4`,
   40.4 s. Attempt 2 (retry ~1 min later): execution `-P2hprIE4e1WGLsIRJZ4`, 41.8 s. Both fail
-  identically inside the YingMusic-Singer render step with
+  identically inside the Audial text2vox worker's render step with
   `torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 3.65 GiB. GPU 0 has a total
   capacity of 23.52 GiB of which 2.98 GiB is free ... this process has 20.03 GiB memory in
   use.` — the dev text2vox GPU already had ~20 GB allocated before either job's inference
@@ -84,8 +84,8 @@ deleted after the run, see "Cleanup" at the bottom).
     audial server's env in your MCP client config (for Claude Code: claude mcp add audial -e
     AUDIAL_USER_ID=... -e AUDIAL_API_KEY=... -- uvx audial-mcp). Get them from your dashboard at
     https://audialmusic.ai, then restart the client."`
-  - PROD unsubscribed account (`AUDIAL_API_BASE_URL=https://api.audialmusic.ai/api`,
-    `PROD_UNSUB_USER_ID` / `PROD_UNSUB_USER_API_KEY`), calling `sound2vital` on `oneshot.wav`:
+  - PROD unsubscribed account (`AUDIAL_API_BASE_URL=https://api.audialmusic.ai/api`, a prod
+    test account without a subscription), calling `sound2vital` on `oneshot.wav`:
     failed fast in **1.6 s** (upload happened, then the API refused before any GPU job started)
     with the exact text:
     `"This feature needs an active Audial subscription. Subscribe at audialmusic.ai and try
@@ -96,7 +96,7 @@ deleted after the run, see "Cleanup" at the bottom).
 
 - [x] **9a. `claude mcp add`** — from the repo directory:
   `claude mcp add audial-dev -s local -e AUDIAL_USER_ID=... -e AUDIAL_API_KEY=... -e
-  AUDIAL_API_BASE_URL=$AUDIAL_API_DEV/api -e AUDIAL_RESULTS_DIR=/tmp/audial-e2e -e
+  AUDIAL_API_BASE_URL=<dev API>/api -e AUDIAL_RESULTS_DIR=/tmp/audial-e2e -e
   AUDIAL_JOB_TIMEOUT_S=1500 -- uv run --directory "$PWD" audial-mcp` → added to local config.
   `claude mcp list` confirmed: `audial-dev: uv run --directory .../audial-mcp audial-mcp - ✔
   Connected`.
@@ -146,8 +146,9 @@ deleted after the run, see "Cleanup" at the bottom).
 | 10 | orphan check | PASS | exit 0, immediate, on stdin close |
 
 **No `audial-mcp` code changes were made.** Every failure in this run (#2, #3, #6) traces to the
-dev-environment RunPod/API backend (a 409-wrapped-as-500 from `primary-analysis`, and a CUDA
-OOM on the text2vox GPU with ~20 GB already allocated before the job started) — confirmed by
+dev-environment API and Audial's hosted GPU workers (a 409-wrapped-as-500 from
+`primary-analysis`, and a CUDA OOM on the text2vox worker with ~20 GB already allocated
+before the job started) — confirmed by
 reproducing #2's failure with a raw SDK call that never touches `audial-mcp`, and by
 `stem_split` (#3) failing at the exact same shared `primary-analysis` step. `audial-mcp` itself
 behaved correctly throughout: it surfaced every remote failure as a readable `ToolError`

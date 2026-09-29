@@ -16,7 +16,9 @@
       "environmentVariables": [
         { "name": "AUDIAL_USER_ID", "description": "Audial user id", "isRequired": true, "isSecret": false },
         { "name": "AUDIAL_API_KEY", "description": "Audial API key", "isRequired": true, "isSecret": true },
-        { "name": "AUDIAL_RESULTS_DIR", "description": "Folder results are written to", "default": "~/Audial" }
+        { "name": "AUDIAL_RESULTS_DIR", "description": "Folder results are written to", "default": "~/Audial" },
+        { "name": "AUDIAL_JOB_TIMEOUT_S", "description": "Seconds to wait for a job before giving up", "default": "900" },
+        { "name": "AUDIAL_API_BASE_URL", "description": "Override the Audial API base URL (advanced)", "isRequired": false, "isSecret": false }
       ]
     }
   ]
