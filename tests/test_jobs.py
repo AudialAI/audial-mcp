@@ -56,3 +56,30 @@ async def test_exceptions_from_work_propagate():
 
     with pytest.raises(RuntimeError, match="boom"):
         await run_job(ctx, "analyze", bad, timeout_s=1, heartbeat_s=0.05)
+
+
+@pytest.mark.anyio
+async def test_timeout_error_from_work_is_not_relabeled_as_job_timeout():
+    ctx = FakeCtx()
+
+    def bad():
+        raise TimeoutError("socket read timed out")
+
+    with pytest.raises(TimeoutError, match="socket read timed out"):
+        await run_job(ctx, "analyze", bad, timeout_s=5, heartbeat_s=0.05)
+
+
+@pytest.mark.anyio
+async def test_report_progress_failure_does_not_prevent_result():
+    class DisconnectedCtx(FakeCtx):
+        async def report_progress(self, progress, total=None, message=None):
+            raise ConnectionResetError("client disconnected")
+
+    ctx = DisconnectedCtx()
+
+    def work():
+        time.sleep(0.2)
+        return "done"
+
+    result = await run_job(ctx, "stem_split", work, timeout_s=5, heartbeat_s=0.05)
+    assert result == "done"

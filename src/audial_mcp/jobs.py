@@ -33,7 +33,13 @@ async def run_job(
         while True:
             await anyio.sleep(heartbeat_s)
             elapsed = int(time.monotonic() - started)
-            await ctx.report_progress(elapsed, message=f"{label}: {elapsed} s elapsed")
+            try:
+                # Progress is best-effort: a disconnected client must not
+                # decide the job's outcome, so swallow reporting failures here
+                # rather than let them cross the task group as an error.
+                await ctx.report_progress(elapsed, message=f"{label}: {elapsed} s elapsed")
+            except Exception:
+                return
 
     # Exceptions (other than cancellation) are caught here rather than left to
     # propagate out of the `async with` block: anyio's TaskGroup.__aexit__
@@ -42,20 +48,25 @@ async def run_job(
     # Catching and re-raising after the block exits keeps the caller-facing
     # exception a bare JobTimeout / the original error. CancelledError is left
     # to propagate normally; anyio already excludes it from that wrapping.
+    #
+    # A bare `except TimeoutError` here would be wrong: fn itself may raise a
+    # TimeoutError (socket.timeout / concurrent.futures.TimeoutError are
+    # aliases of it), which must propagate as itself, not get relabeled as a
+    # JobTimeout. So the deadline is detected via move_on_after's
+    # cancelled_caught instead of by catching an exception type.
     error: Exception | None = None
     result: T | None = None
     async with anyio.create_task_group() as tg:
         tg.start_soon(heartbeat)
-        try:
-            with anyio.fail_after(timeout_s):
+        with anyio.move_on_after(timeout_s) as scope:
+            try:
                 # Cancelling to_thread does not stop the thread; it finishes quietly.
                 result = await anyio.to_thread.run_sync(fn, abandon_on_cancel=True)
-        except TimeoutError:
-            error = JobTimeout(label, time.monotonic() - started)
-        except Exception as exc:
-            error = exc
-        finally:
-            tg.cancel_scope.cancel()
+            except Exception as exc:
+                error = exc
+        tg.cancel_scope.cancel()
+    if scope.cancelled_caught:
+        raise JobTimeout(label, time.monotonic() - started)
     if error is not None:
         raise error
     return result
