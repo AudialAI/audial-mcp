@@ -63,7 +63,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "anyio", specifier = ">=4" },
-    { name = "audial-sdk", editable = "../audial-sdk" },
+    { name = "audial-sdk", specifier = ">=1.2.2" },
     { name = "mcp", specifier = ">=2.2,<3" },
     { name = "pydantic", specifier = ">=2" },
     { name = "typing-extensions", specifier = ">=4" },
@@ -80,7 +80,7 @@ dev = [
 [[package]]
 name = "audial-sdk"
 version = "1.2.2"
-source = { editable = "../audial-sdk" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "black" },
     { name = "click" },
@@ -92,19 +92,9 @@ dependencies = [
     { name = "requests" },
     { name = "tqdm" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "black", specifier = ">=21.5b2" },
-    { name = "click", specifier = ">=8.0.0" },
-    { name = "flake8", specifier = ">=3.9.0" },
-    { name = "importlib-metadata", marker = "python_full_version < '3.8'", specifier = ">=1.0.0" },
-    { name = "pytest", specifier = ">=6.0.0" },
-    { name = "pytest-cov", specifier = ">=2.12.0" },
-    { name = "pytest-mock", specifier = ">=3.6.0" },
-    { name = "python-dotenv", specifier = ">=0.19.0" },
-    { name = "requests", specifier = ">=2.25.0" },
-    { name = "tqdm", specifier = ">=4.62.0" },
+sdist = { url = "https://files.pythonhosted.org/packages/0d/d6/bfdf7d7cab2755697b15e352c09cca2e32398eef7a74d93006b94660ab1a/audial_sdk-1.2.2.tar.gz", hash = "sha256:dbc40941f14876df853a511a528c3ea81beb03d20e33c5cc77eee527b861fcb5", size = 58423, upload-time = "2026-09-29T15:08:23.29Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/72/df/298a98ee9df0568fe9c458fadffd2f99d53bb4c983b8f44836b68861e2df/audial_sdk-1.2.2-py3-none-any.whl", hash = "sha256:49ff0c4d7ccb3d8e26ca516ff9d1572f91f9198b366aadb78750ffcf5f1babfc", size = 61164, upload-time = "2026-09-29T15:08:22.234Z" },
 ]
 
 [[package]]

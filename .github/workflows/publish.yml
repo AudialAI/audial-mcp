@@ -2,6 +2,8 @@ name: publish
 on:
   push:
     tags: ["v*"]
+permissions:
+  contents: read
 jobs:
   pypi:
     runs-on: ubuntu-latest
@@ -9,5 +11,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --group dev && uv run pytest -q
+      # A tag that disagrees with pyproject.toml would publish a version nobody asked for,
+      # and PyPI versions cannot be replaced. Stop before the build, not after.
+      - name: Tag must match the version in pyproject.toml
+        run: |
+          version="$(uv version --short)"
+          if [ "refs/tags/v${version}" != "$GITHUB_REF" ]; then
+            echo "tag $GITHUB_REF does not match pyproject.toml version $version" >&2
+            exit 1
+          fi
       - run: uv build
       - run: uv publish --token "${{ secrets.PYPI_TOKEN }}"

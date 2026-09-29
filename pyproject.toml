@@ -35,11 +35,13 @@ audial-mcp = "audial_mcp.server:main"
 [dependency-groups]
 dev = ["pytest>=8", "anyio>=4", "ruff>=0.6", "build>=1.2"]
 
-[tool.uv.sources]
-audial-sdk = { path = "../audial-sdk", editable = true }
-
 [tool.hatch.build.targets.wheel]
 packages = ["src/audial_mcp"]
+
+# The sdist ships the package and its metadata, not the project's working notes: docs/ is
+# design and checklist material, .github/ is CI, .superpowers/ is planning scratch.
+[tool.hatch.build.targets.sdist]
+exclude = ["docs", ".github", ".superpowers"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -47,6 +49,9 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+# `ruff format` rewrites Python code blocks inside Markdown, which reflows the illustrative
+# snippets in the design and plan documents. Those are prose, not code that runs.
+extend-exclude = ["docs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
