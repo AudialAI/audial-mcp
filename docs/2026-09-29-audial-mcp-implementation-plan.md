@@ -1450,8 +1450,8 @@ git add -A && git commit -m "server: MCPServer with ten Audial tools"
 ```markdown
 # Manual e2e checklist — audial-mcp
 
-Environment: dev API (`AUDIAL_API_BASE_URL=https://starfish-app-2x28e.ondigitalocean.app/api`),
-smoke account (`SMOKE_USER_ID` / `SMOKE_USER_API_KEY` from genetic_vital/.env),
+Environment: dev API (`AUDIAL_API_BASE_URL=<dev API host>/api`),
+a dev test account with an active subscription,
 `AUDIAL_RESULTS_DIR=/tmp/audial-e2e`.
 
 ## Inspector
@@ -1470,7 +1470,7 @@ smoke account (`SMOKE_USER_ID` / `SMOKE_USER_API_KEY` from genetic_vital/.env),
 - [ ] Kill the client mid-job: server process exits with the client (no orphaned `audial-mcp`).
 
 ## Prod (after Task 9 publishes 0.1.0)
-- [ ] `claude mcp add audial -e … -- uvx audial-mcp` with the zfmoodydub account: stem_split + generate_music succeed against api.audialmusic.ai.
+- [ ] `claude mcp add audial -e … -- uvx audial-mcp` with a subscribed prod test account: stem_split + generate_music succeed against api.audialmusic.ai.
 - [ ] Windows: not tested (see design open question 6).
 ```
 

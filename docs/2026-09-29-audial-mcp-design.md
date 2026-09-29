@@ -212,7 +212,7 @@ can act on it (anything else surfaces as an opaque "Error executing tool"):
   called with the right kwargs and `results_folder`, and that the structured result has
   the inventory. One test lets the fake SDK `print()` and asserts the protocol survives.
 - **Manual e2e (documented checklist):** `mcp dev` Inspector against the dev API with the
-  smoke account; then Claude Code against prod with the zfmoodydub account: stem split,
+  smoke account; then Claude Code against prod with a subscribed test account: stem split,
   analyze, generate_music, sound2vital, text2vox, and a 402 with the unsubscribed account.
 - **CI:** tests on every push/PR (3.10 and 3.12), publish on tag.
 
