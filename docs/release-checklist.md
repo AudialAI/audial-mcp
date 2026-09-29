@@ -6,6 +6,6 @@
 4. Verify `pip index versions audial-mcp` / PyPI page; `uvx audial-mcp==X.Y.Z </dev/null`
    exits 0 after printing its startup line to stderr (there is no `--help`; with stdin open
    the server blocks waiting for MCP traffic).
-5. `mcp-publisher publish` (Task 10) so the registry shows the new version.
+5. `mcp-publisher login github --token "$(gh auth token)"` (an org owner token with read:org; the device flow only grants the personal namespace) then `mcp-publisher publish`, with `server.json` version bumped and its description ≤ 100 characters.
 6. Push the plugin repo; the Claude directory picks up the tracked branch automatically.
 7. Update the website MCP tab if tools or config changed.
