@@ -546,9 +546,7 @@ async def sound2vital(
         ),
     ],
 ) -> JobResult:
-    """Turn a one-shot sample into an editable Audial Synth preset.
-
-    """
+    """Turn a one-shot sample into an editable Audial Synth preset."""
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
         src = check_file(file_path, AUDIO_EXTENSIONS, "audio file")
@@ -613,9 +611,7 @@ async def text2vox(
     ] = None,
     seed: Annotated[int | None, Field(description="Seed for reproducible output.")] = None,
 ) -> JobResult:
-    """Synthesize a sung vocal (and MIDI) from lyrics, a melody and a reference voice.
-
-    """
+    """Synthesize a sung vocal (and MIDI) from lyrics, a melody and a reference voice."""
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
         ref = check_file(reference_file, AUDIO_EXTENSIONS, "reference audio file")
