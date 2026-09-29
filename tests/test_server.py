@@ -2,9 +2,9 @@ import json
 from pathlib import Path
 
 import pytest
+from audial.api.exceptions import AudialError
 from mcp import Client
 
-import audial_mcp.results as results_mod
 import audial_mcp.server as server_mod
 from audial_mcp.config import Settings
 
@@ -56,7 +56,10 @@ def fake_sdk(monkeypatch, name, *, produce=("vocals.wav",), returns=None, calls=
         folder = Path(kwargs["results_folder"])
         for fname in produce:
             (folder / fname).write_bytes(b"0")
-        print("SDK progress line that must not corrupt the protocol")
+        # The SDK prints progress to stdout. This in-memory client proves nothing about that;
+        # protocol safety comes from the stdio transport, which redirects fd 1 to stderr for the
+        # duration of the session (see mcp/server/stdio.py). Kept because it is harmless.
+        print("SDK progress line")
         return (
             returns
             if returns is not None
@@ -118,7 +121,8 @@ async def test_generate_music_uses_prompt_slug_and_no_file(client, settings, mon
     data = result.structured_content
     assert Path(data["output_dir"]).name.endswith("_upbeat_country_shuffle")
     assert data["metadata"]["execution"]["generation_metadata"]["bpm"] == 96
-    assert calls[0][1]["prompt"] == "upbeat country shuffle" and calls[0][1]["max_wait"] == 5
+    assert calls[0][1]["prompt"] == "upbeat country shuffle"
+    assert calls[0][1]["max_wait"] == 5 + server_mod.SDK_WAIT_HEADROOM_S
 
 
 @pytest.mark.anyio
@@ -151,22 +155,68 @@ async def test_summary_text_mentions_folder(client, wav, monkeypatch):
     assert "master" in text and "mastered.wav" in json.dumps(result.structured_content)
 
 
-def _fields(typed_dict):
-    return {
-        name: getattr(hint, "__forward_arg__", str(hint))
-        for name, hint in typed_dict.__annotations__.items()
-    }
-
-
-def test_output_schema_mirrors_the_results_typeddicts():
-    """server.py re-declares these so pydantic accepts them below Python 3.12."""
-    assert _fields(server_mod.JobResult) == _fields(results_mod.JobResult)
-    assert _fields(server_mod.FileInfo) == _fields(results_mod.FileInfo)
-
-
 @pytest.mark.anyio
 async def test_every_tool_documents_its_parameters(client):
     for tool in (await client.list_tools()).tools:
         assert tool.description, f"{tool.name} has no description"
         for name, prop in tool.input_schema.get("properties", {}).items():
             assert prop.get("description"), f"{tool.name}.{name} has no description"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("escape", ["..", "../x", "/etc", "stem_split/../..", "sub\\dir"])
+async def test_list_results_refuses_to_leave_the_results_directory(
+    client, settings, wav, monkeypatch, escape
+):
+    fake_sdk(monkeypatch, "analyze", produce=("analysis.json",))
+    await client.call_tool("analyze", {"file_path": str(wav)})
+    # A sibling of the results dir that a traversal would otherwise reach.
+    outside = settings.results_dir.parent / "secrets"
+    (outside / "job").mkdir(parents=True)
+    (outside / "job" / "private.key").write_bytes(b"0")
+
+    result = await client.call_tool("list_results", {"tool": escape})
+    assert result.is_error
+    text = result.content[0].text
+    assert "tool name" in text or "results directory" in text
+    assert "private.key" not in text and "secrets" not in text
+    assert result.structured_content is None
+
+
+@pytest.mark.anyio
+async def test_metadata_never_carries_credentials(client, settings, wav, monkeypatch):
+    fake_sdk(
+        monkeypatch,
+        "analyze",
+        produce=("analysis.json",),
+        returns={
+            "execution": {
+                "exeId": "-P2h",
+                "userId": "u1",
+                "api_key": "k1",
+                "generation_metadata": {"bpm": 96, "userId": "u1"},
+                "attempts": [{"userId": "u1", "state": "completed"}],
+            }
+        },
+    )
+    result = await client.call_tool("analyze", {"file_path": str(wav)})
+    blob = json.dumps(result.structured_content)
+    assert "userId" not in blob and "api_key" not in blob and "u1" not in blob and "k1" not in blob
+    metadata = result.structured_content["metadata"]
+    assert metadata["execution"]["generation_metadata"]["bpm"] == 96
+    assert metadata["execution"]["attempts"][0]["state"] == "completed"
+    assert result.structured_content["execution_id"] == "-P2h"
+
+
+@pytest.mark.anyio
+async def test_a_failed_job_leaves_no_empty_folder(client, settings, wav, monkeypatch):
+    def boom(*args, **kwargs):
+        raise AudialError("the service refused the upload")
+
+    monkeypatch.setattr(server_mod.audial, "master", boom)
+    result = await client.call_tool("master", {"file_path": str(wav)})
+    assert result.is_error and "refused the upload" in result.content[0].text
+    assert list((settings.results_dir / "master").glob("*")) == []
+
+    listed = await client.call_tool("list_results", {"tool": "master"})
+    assert listed.structured_content["result"] == []

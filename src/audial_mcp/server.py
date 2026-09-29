@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
+import re
 import sys
 import time
 from collections.abc import Callable
@@ -15,41 +17,21 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 from mcp.types import ToolAnnotations
 from pydantic import Field
-from typing_extensions import TypedDict
 
 from audial_mcp import __version__
 from audial_mcp.config import Settings, load_settings
 from audial_mcp.errors import to_tool_error
 from audial_mcp.jobs import run_job
-from audial_mcp.results import inventory, list_jobs, new_job_dir, slugify
-from audial_mcp.validation import AUDIO_EXTENSIONS, JSON_EXTENSIONS, MIDI_EXTENSIONS, check_file
+from audial_mcp.results import JobResult, inventory, list_jobs, new_job_dir, slugify
+from audial_mcp.validation import (
+    AUDIO_EXTENSIONS,
+    JSON_EXTENSIONS,
+    MIDI_EXTENSIONS,
+    ValidationError,
+    check_file,
+)
 
 log = logging.getLogger("audial_mcp")
-
-
-# `results.FileInfo` / `results.JobResult` are `typing.TypedDict`s, which pydantic refuses to
-# build a schema from below Python 3.12. These mirrors carry the same fields as
-# `typing_extensions.TypedDict`s so tools can declare them and get a structured output schema;
-# the dicts the tools actually return are the plain dicts the results module builds.
-# tests/test_server.py fails if the two ever drift apart.
-class FileInfo(TypedDict):
-    """One file a job wrote into its results folder."""
-
-    name: str
-    path: str
-    size_bytes: int
-
-
-class JobResult(TypedDict):
-    """What every Audial tool returns: where the files are and what the service reported."""
-
-    tool: str
-    execution_id: str | None
-    output_dir: str
-    files: list[FileInfo]
-    metadata: dict[str, Any]
-    summary: str
-
 
 INSTRUCTIONS = (
     "Audial runs hosted audio tools. Give tools full local file paths. Results are written to "
@@ -62,6 +44,12 @@ INSTRUCTIONS = (
 mcp = MCPServer("audial", instructions=INSTRUCTIONS, version=__version__)
 
 _settings: Settings = load_settings()
+
+_TOOL_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+# The SDK is given a little more patience than `run_job`'s watchdog, so the watchdog fires first
+# and the user gets `JobTimeout`'s guidance rather than a bare SDK timeout.
+SDK_WAIT_HEADROOM_S = 60
 
 REMOTE = ToolAnnotations(read_only_hint=False, open_world_hint=True, idempotent_hint=False)
 READ_ONLY_REMOTE = ToolAnnotations(read_only_hint=True, open_world_hint=True)
@@ -87,10 +75,45 @@ def _execution_id(raw: Any) -> str | None:
     return None
 
 
+# Keys the service echoes back that identify or authenticate the user. They are stripped from
+# `metadata` at every depth: a tool result is shown to the model and written into transcripts.
+SECRET_KEYS = frozenset(
+    {"userid", "user_id", "api_key", "apikey", "x-api-key", "apikeyid", "authorization", "token"}
+)
+
+
+def _redact(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _redact(v) for k, v in value.items() if str(k).lower() not in SECRET_KEYS}
+    if isinstance(value, (list, tuple)):
+        return [_redact(item) for item in value]
+    return value
+
+
 def _metadata(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
-        return {"result": raw}
-    return {k: v for k, v in raw.items() if k != "files"}
+        return {"result": _redact(raw)}
+    return _redact({k: v for k, v in raw.items() if k != "files"})
+
+
+def _tool_filter(tool: str) -> str:
+    """Check a model-supplied tool name before it is joined onto the results directory."""
+    if not _TOOL_NAME_RE.fullmatch(tool):
+        raise ValidationError(
+            f"{tool!r} is not a tool name. Give one of the Audial tool names "
+            "(letters, digits, '_' and '-' only), or omit it to list every tool."
+        )
+    root = _settings.results_dir.resolve()
+    if not (root / tool).resolve().is_relative_to(root):
+        raise ValidationError(f"{tool!r} does not name a folder inside the results directory.")
+    return tool
+
+
+def _discard_if_empty(folder: Path) -> None:
+    """A job that failed before writing anything leaves no empty folder behind."""
+    with contextlib.suppress(OSError):
+        if folder.is_dir() and not any(folder.iterdir()):
+            folder.rmdir()
 
 
 def _apply_credentials() -> None:
@@ -98,6 +121,8 @@ def _apply_credentials() -> None:
     _settings.require_credentials()
     if _settings.api_base_url:
         os.environ["AUDIAL_API_BASE_URL"] = _settings.api_base_url
+    else:
+        os.environ.pop("AUDIAL_API_BASE_URL", None)
     os.environ["AUDIAL_USER_ID"] = _settings.user_id or ""
     os.environ["AUDIAL_API_KEY"] = _settings.api_key or ""
 
@@ -105,6 +130,7 @@ def _apply_credentials() -> None:
 async def _execute(ctx: Context, tool: str, plan: Plan) -> JobResult:
     """Common path: validate → credentials → job folder → run in thread → inventory → JobResult."""
     execution_id: str | None = None
+    output_dir: Path | None = None
     try:
         slug, call = plan()
         _apply_credentials()
@@ -118,7 +144,9 @@ async def _execute(ctx: Context, tool: str, plan: Plan) -> JobResult:
         elapsed = int(time.monotonic() - started)
         summary = f"{tool} finished in {elapsed} s: {len(files)} file(s) in {output_dir}"
         log.info("%s", summary)
-        await ctx.report_progress(elapsed, total=elapsed, message=summary)
+        # The job is done; a failed progress notification must not turn it into an error.
+        with contextlib.suppress(Exception):
+            await ctx.report_progress(elapsed, total=elapsed, message=summary)
         return JobResult(
             tool=tool,
             execution_id=execution_id,
@@ -128,6 +156,8 @@ async def _execute(ctx: Context, tool: str, plan: Plan) -> JobResult:
             summary=summary,
         )
     except Exception as exc:  # noqa: BLE001 — every failure becomes a ToolError
+        if output_dir is not None:
+            _discard_if_empty(output_dir)
         raise to_tool_error(exc, tool=tool, execution_id=execution_id) from None
 
 
@@ -315,7 +345,7 @@ async def generate_midi(
             file_path=str(src),
             bpm=bpm,
             results_folder=str(out),
-            max_wait=_settings.job_timeout_s,
+            max_wait=_settings.job_timeout_s + SDK_WAIT_HEADROOM_S,
         )
 
     return await _execute(ctx, "generate_midi", plan)
@@ -443,7 +473,7 @@ async def generate_music(
             instrumental=instrumental,
             negative_prompt=negative_prompt,
             results_folder=str(out),
-            max_wait=_settings.job_timeout_s,
+            max_wait=_settings.job_timeout_s + SDK_WAIT_HEADROOM_S,
         )
 
     return await _execute(ctx, "generate_music", plan)
@@ -472,7 +502,7 @@ async def sound2vital(
         return slugify(src.stem), lambda out: audial.sound2vital(
             file_path=str(src),
             results_folder=str(out),
-            max_wait=_settings.job_timeout_s,
+            max_wait=_settings.job_timeout_s + SDK_WAIT_HEADROOM_S,
         )
 
     return await _execute(ctx, "sound2vital", plan)
@@ -565,7 +595,7 @@ async def text2vox(
             leading_silence_s=leading_silence_s,
             seed=seed,
             results_folder=str(out),
-            max_wait=_settings.job_timeout_s,
+            max_wait=_settings.job_timeout_s + SDK_WAIT_HEADROOM_S,
         )
 
     return await _execute(ctx, "text2vox", plan)
@@ -584,7 +614,7 @@ async def list_results(
 ) -> list[JobResult]:
     """List previous Audial results in the results folder, newest first."""
     try:
-        return list_jobs(_settings.results_dir, tool, limit)
+        return list_jobs(_settings.results_dir, _tool_filter(tool) if tool else None, limit)
     except Exception as exc:  # noqa: BLE001 — every failure becomes a ToolError
         raise to_tool_error(exc, tool="list_results") from None
 

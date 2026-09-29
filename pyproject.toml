@@ -21,6 +21,7 @@ dependencies = [
   "audial-sdk>=1.2.2",
   "anyio>=4",
   "pydantic>=2",
+  "typing_extensions>=4",
 ]
 
 [project.urls]

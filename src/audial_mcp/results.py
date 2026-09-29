@@ -5,7 +5,9 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any
+
+from typing_extensions import TypedDict
 
 _SLUG_RE = re.compile(r"[^A-Za-z0-9_-]+")
 SLUG_MAX = 40
