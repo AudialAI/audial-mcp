@@ -15,11 +15,12 @@ from typing import Annotated, Any
 import audial
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from audial_mcp import __version__
-from audial_mcp.config import Settings, load_settings
+from audial_mcp.config import ConfigError, Settings, fallback_settings, load_settings
 from audial_mcp.errors import to_tool_error
 from audial_mcp.jobs import run_job
 from audial_mcp.results import JobResult, inventory, list_jobs, new_job_dir, slugify
@@ -43,7 +44,16 @@ INSTRUCTIONS = (
 
 mcp = MCPServer("audial", instructions=INSTRUCTIONS, version=__version__)
 
-_settings: Settings = load_settings()
+# Settings are read at import so the tool bodies can use them, but a bad value must not kill
+# the import: that surfaces in clients as an opaque "server failed to start" with a raw
+# traceback, before `main()` has even configured logging. Instead the server comes up with
+# usable defaults, remembers the error, and returns it from every tool call.
+_startup_error: ConfigError | None = None
+try:
+    _settings: Settings = load_settings()
+except ConfigError as exc:
+    _settings = fallback_settings()
+    _startup_error = exc
 
 _TOOL_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
 
@@ -82,12 +92,44 @@ SECRET_KEYS = frozenset(
 )
 
 
+REDACTED = "<redacted>"
+
+
+def _secrets() -> tuple[str, ...]:
+    """The configured credential strings, longest first so the longer match wins."""
+    values = {v for v in (_settings.api_key, _settings.user_id) if v}
+    return tuple(sorted(values, key=len, reverse=True))
+
+
 def _redact(value: Any) -> Any:
+    """Strip credentials from anything on its way back to the model.
+
+    Two passes, because the service does not always echo secrets back under a predictable
+    key: known credential *keys* are dropped, and any string that *is* one of the configured
+    credentials is replaced, wherever it appears.
+    """
     if isinstance(value, dict):
         return {k: _redact(v) for k, v in value.items() if str(k).lower() not in SECRET_KEYS}
     if isinstance(value, (list, tuple)):
         return [_redact(item) for item in value]
+    if isinstance(value, str):
+        return _redact_text(value)
     return value
+
+
+def _redact_text(text: str) -> str:
+    """Replace any configured credential appearing inside `text`."""
+    for secret in _secrets():
+        text = text.replace(secret, REDACTED)
+    return text
+
+
+def _tool_error(exc: BaseException, *, tool: str, execution_id: str | None = None) -> ToolError:
+    """`to_tool_error`, with credentials scrubbed out of the message it produces.
+
+    Upstream error text can quote the request it failed on, which may carry the user id.
+    """
+    return ToolError(_redact_text(str(to_tool_error(exc, tool=tool, execution_id=execution_id))))
 
 
 def _metadata(raw: Any) -> dict[str, Any]:
@@ -110,10 +152,19 @@ def _tool_filter(tool: str) -> str:
 
 
 def _discard_if_empty(folder: Path) -> None:
-    """A job that failed before writing anything leaves no empty folder behind."""
+    """A job that failed before writing anything leaves no empty folder behind.
+
+    The job folder's parent is the per-tool folder; if this job was the only thing in it, that
+    goes too, so a tool that has never produced anything does not show up in the results
+    directory at all.
+    """
     with contextlib.suppress(OSError):
-        if folder.is_dir() and not any(folder.iterdir()):
-            folder.rmdir()
+        if not folder.is_dir() or any(folder.iterdir()):
+            return
+        folder.rmdir()
+        parent = folder.parent
+        if parent != _settings.results_dir and parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
 
 
 def _apply_credentials() -> None:
@@ -129,6 +180,8 @@ def _apply_credentials() -> None:
 
 async def _execute(ctx: Context, tool: str, plan: Plan) -> JobResult:
     """Common path: validate → credentials → job folder → run in thread → inventory → JobResult."""
+    if _startup_error is not None:
+        raise ToolError(str(_startup_error))
     execution_id: str | None = None
     output_dir: Path | None = None
     try:
@@ -158,7 +211,7 @@ async def _execute(ctx: Context, tool: str, plan: Plan) -> JobResult:
     except Exception as exc:  # noqa: BLE001 — every failure becomes a ToolError
         if output_dir is not None:
             _discard_if_empty(output_dir)
-        raise to_tool_error(exc, tool=tool, execution_id=execution_id) from None
+        raise _tool_error(exc, tool=tool, execution_id=execution_id) from None
 
 
 FilePath = Annotated[
@@ -613,24 +666,34 @@ async def list_results(
     ] = 10,
 ) -> list[JobResult]:
     """List previous Audial results in the results folder, newest first."""
+    if _startup_error is not None:
+        raise ToolError(str(_startup_error))
     try:
         return list_jobs(_settings.results_dir, _tool_filter(tool) if tool else None, limit)
     except Exception as exc:  # noqa: BLE001 — every failure becomes a ToolError
-        raise to_tool_error(exc, tool="list_results") from None
+        raise _tool_error(exc, tool="list_results") from None
 
 
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO, stream=sys.stderr, format="%(levelname)s %(name)s: %(message)s"
     )
-    global _settings
-    _settings = load_settings()
+    global _settings, _startup_error
+    try:
+        _settings = load_settings()
+        _startup_error = None
+    except ConfigError as exc:
+        _settings = fallback_settings()
+        _startup_error = exc
     log.info(
         "audial-mcp %s; results dir %s; credentials %s",
         __version__,
         _settings.results_dir,
         "present" if _settings.user_id and _settings.api_key else "MISSING",
     )
+    if _startup_error is not None:
+        # Serve anyway: the client sees a working server whose tools all explain this.
+        log.error("configuration error; every tool call will return it: %s", _startup_error)
     mcp.run()  # stdio
 
 

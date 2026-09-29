@@ -6,6 +6,9 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
+from audial_mcp import BOOT_ENV
 
 DEFAULT_RESULTS_DIR = "~/Audial"
 DEFAULT_JOB_TIMEOUT_S = 900
@@ -35,7 +38,28 @@ class Settings:
             raise ConfigError(CREDENTIALS_HELP)
 
 
-def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
+def _always_parseable(env: Mapping[str, str]) -> dict[str, Any]:
+    """The settings fields that cannot fail to parse: credentials, base URL, results dir."""
+    results_dir = Path(
+        os.path.expandvars(env.get("AUDIAL_RESULTS_DIR") or DEFAULT_RESULTS_DIR)
+    ).expanduser()
+    return {
+        "user_id": (env.get("AUDIAL_USER_ID") or "").strip() or None,
+        "api_key": (env.get("AUDIAL_API_KEY") or "").strip() or None,
+        "results_dir": results_dir,
+        "api_base_url": (env.get("AUDIAL_API_BASE_URL") or "").strip() or None,
+    }
+
+
+def load_settings(env: Mapping[str, str] | None = None) -> Settings:
+    """Read settings from `env`, defaulting to the environment as it was at import time.
+
+    The default is `audial_mcp.BOOT_ENV`, not the live `os.environ`: the Audial SDK calls
+    `dotenv.load_dotenv()` when it is imported, so a `.env` file in whatever directory the MCP
+    client happened to launch the server from would otherwise be able to override the
+    credentials and API host the client configured.
+    """
+    env = BOOT_ENV if env is None else env
     raw_timeout = env.get("AUDIAL_JOB_TIMEOUT_S", str(DEFAULT_JOB_TIMEOUT_S))
     try:
         timeout = int(raw_timeout)
@@ -47,14 +71,15 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
             f"got {raw_timeout!r}"
         ) from None
 
-    results_dir = Path(
-        os.path.expandvars(env.get("AUDIAL_RESULTS_DIR") or DEFAULT_RESULTS_DIR)
-    ).expanduser()
+    return Settings(**_always_parseable(env), job_timeout_s=timeout)
 
-    return Settings(
-        user_id=(env.get("AUDIAL_USER_ID") or "").strip() or None,
-        api_key=(env.get("AUDIAL_API_KEY") or "").strip() or None,
-        results_dir=results_dir,
-        api_base_url=(env.get("AUDIAL_API_BASE_URL") or "").strip() or None,
-        job_timeout_s=timeout,
-    )
+
+def fallback_settings(env: Mapping[str, str] | None = None) -> Settings:
+    """Settings to run with when `load_settings` raised: what parsed, defaults for what did not.
+
+    The server keeps starting on a bad `AUDIAL_JOB_TIMEOUT_S` so that it can list its tools and
+    return the configuration error as a readable message. A server that dies at import shows up
+    in clients as an opaque "failed to start".
+    """
+    env = BOOT_ENV if env is None else env
+    return Settings(**_always_parseable(env), job_timeout_s=DEFAULT_JOB_TIMEOUT_S)

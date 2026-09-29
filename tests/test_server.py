@@ -1,12 +1,17 @@
+import inspect
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
+import audial
 import pytest
 from audial.api.exceptions import AudialError
 from mcp import Client
 
 import audial_mcp.server as server_mod
-from audial_mcp.config import Settings
+from audial_mcp.config import ConfigError, Settings
 
 TOOLS = {
     "stem_split",
@@ -220,3 +225,142 @@ async def test_a_failed_job_leaves_no_empty_folder(client, settings, wav, monkey
 
     listed = await client.call_tool("list_results", {"tool": "master"})
     assert listed.structured_content["result"] == []
+
+
+@pytest.mark.anyio
+async def test_a_failed_job_leaves_no_empty_tool_folder(client, settings, wav, monkeypatch):
+    def boom(*args, **kwargs):
+        raise AudialError("the service refused the upload")
+
+    monkeypatch.setattr(server_mod.audial, "master", boom)
+    settings.results_dir.mkdir(parents=True, exist_ok=True)
+    await client.call_tool("master", {"file_path": str(wav)})
+    # Not just the job folder: the `master/` folder it was created under goes too.
+    assert not (settings.results_dir / "master").exists()
+    assert settings.results_dir.exists()
+
+
+@pytest.mark.anyio
+async def test_a_failed_job_keeps_a_tool_folder_that_still_has_results(
+    client, settings, wav, monkeypatch
+):
+    fake_sdk(monkeypatch, "master", produce=("mastered.wav",))
+    await client.call_tool("master", {"file_path": str(wav)})
+
+    def boom(*args, **kwargs):
+        raise AudialError("the service refused the upload")
+
+    monkeypatch.setattr(server_mod.audial, "master", boom)
+    await client.call_tool("master", {"file_path": str(wav)})
+    kept = list((settings.results_dir / "master").iterdir())
+    assert len(kept) == 1 and (kept[0] / "mastered.wav").is_file()
+
+
+@pytest.mark.anyio
+async def test_credentials_are_redacted_by_value_from_metadata(client, settings, wav, monkeypatch):
+    """Redaction cannot rely on key names alone: the service picks its own."""
+    fake_sdk(
+        monkeypatch,
+        "analyze",
+        produce=("analysis.json",),
+        returns={
+            "execution": {
+                "exeId": "-P2h",
+                "owner": "u1",
+                "notes": ["submitted by u1 with key k1"],
+                "nested": {"whoever": "k1"},
+            }
+        },
+    )
+    result = await client.call_tool("analyze", {"file_path": str(wav)})
+    blob = json.dumps(result.structured_content)
+    assert "u1" not in blob and "k1" not in blob, blob
+    metadata = result.structured_content["metadata"]
+    assert metadata["execution"]["owner"] == "<redacted>"
+    assert metadata["execution"]["nested"]["whoever"] == "<redacted>"
+    assert "<redacted>" in metadata["execution"]["notes"][0]
+
+
+@pytest.mark.anyio
+async def test_credentials_are_redacted_from_tool_error_text(client, settings, wav, monkeypatch):
+    def boom(*args, **kwargs):
+        raise AudialError("rejected request for user u1 (key k1)")
+
+    monkeypatch.setattr(server_mod.audial, "analyze", boom)
+    result = await client.call_tool("analyze", {"file_path": str(wav)})
+    text = result.content[0].text
+    assert result.is_error
+    assert "u1" not in text and "k1" not in text, text
+    assert "rejected request for user <redacted>" in text
+
+
+@pytest.mark.anyio
+async def test_a_startup_config_error_is_returned_by_every_tool(client, settings, wav, monkeypatch):
+    monkeypatch.setattr(
+        server_mod, "_startup_error", ConfigError("AUDIAL_JOB_TIMEOUT_S must be a positive integer")
+    )
+    for name, args in (("analyze", {"file_path": str(wav)}), ("list_results", {})):
+        result = await client.call_tool(name, args)
+        assert result.is_error, name
+        assert "AUDIAL_JOB_TIMEOUT_S" in result.content[0].text, name
+
+
+def test_a_bad_timeout_does_not_crash_the_import(tmp_path):
+    """Importing the server with a malformed setting must not raise a traceback at import.
+
+    `_settings` is read at module scope, before `main()` has configured logging, so a raised
+    ConfigError would reach the client as an opaque "server failed to start".
+    """
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import audial_mcp.server as s;"
+            "print(s._startup_error);"
+            "print(s._settings.job_timeout_s, s._settings.user_id)",
+        ],
+        env={**os.environ, "AUDIAL_JOB_TIMEOUT_S": "soon", "AUDIAL_USER_ID": "u1"},
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "AUDIAL_JOB_TIMEOUT_S" in proc.stdout
+    assert "900 u1" in proc.stdout
+
+
+SDK_TOOL_ARGS = {
+    "stem_split": {"file_path": "{wav}", "stems": ["vocals"], "target_bpm": 90},
+    "analyze": {"file_path": "{wav}"},
+    "segment": {"file_path": "{wav}", "components": ["drums"], "genre": "house"},
+    "master": {"file_path": "{wav}", "reference_file": "{wav}"},
+    "generate_samples": {"file_path": "{wav}", "components": ["drums"]},
+    "generate_midi": {"file_path": "{wav}", "bpm": 120},
+    "generate_music": {"prompt": "upbeat country shuffle", "audio_duration": 30, "seed": 7},
+    "sound2vital": {"file_path": "{wav}"},
+    "text2vox": {"reference_file": "{wav}", "lyrics": "la la", "midi_file": "{mid}", "seed": 3},
+}
+
+
+@pytest.mark.anyio
+async def test_tool_kwargs_bind_to_the_real_sdk_signatures(client, tmp_path, wav, monkeypatch):
+    """Every kwarg a tool passes must be accepted by the SDK function it calls.
+
+    The tools are exercised against a fake SDK, so a renamed or dropped SDK parameter would
+    otherwise go unnoticed until a real call failed. Here the recorded kwargs are bound
+    against the *real* function's signature (bound, never called).
+    """
+    mid = tmp_path / "melody.mid"
+    mid.write_bytes(b"0")
+    substitutions = {"{wav}": str(wav), "{mid}": str(mid)}
+
+    for name, template in SDK_TOOL_ARGS.items():
+        real = getattr(audial, name)
+        assert callable(real), f"audial.{name} is missing"
+        calls = fake_sdk(monkeypatch, name, produce=("out.wav",))
+        args = {
+            k: substitutions.get(v, v) if isinstance(v, str) else v for k, v in template.items()
+        }
+        result = await client.call_tool(name, args)
+        assert not result.is_error, f"{name}: {result.content[0].text}"
+        _, kwargs = calls[0]
+        inspect.signature(real).bind(**kwargs)

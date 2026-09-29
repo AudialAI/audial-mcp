@@ -26,3 +26,20 @@ def test_wrong_extension_lists_allowed(tmp_path):
     with pytest.raises(ValidationError) as exc:
         check_file(str(f), MIDI_EXTENSIONS, "MIDI file")
     assert ".mid" in str(exc.value) and "notes.txt" in str(exc.value)
+
+
+def test_env_vars_in_a_path_are_not_expanded(monkeypatch):
+    """A `$VAR` path must be reported verbatim, never expanded.
+
+    `check_file`'s messages go back to the model, and the paths come from the model, so
+    expanding environment variables would turn `check_file("$AUDIAL_API_KEY.wav", ...)` into
+    an oracle that reads the API key out of the server's environment and prints it.
+    """
+    monkeypatch.setenv("AUDIAL_API_KEY", "sk-live-do-not-leak")
+    monkeypatch.setenv("AUDIAL_USER_ID", "user-do-not-leak")
+    for probe in ("$AUDIAL_API_KEY.wav", "${AUDIAL_USER_ID}.wav", "~/$AUDIAL_API_KEY.wav"):
+        with pytest.raises(ValidationError) as exc:
+            check_file(probe, AUDIO_EXTENSIONS, "audio file")
+        message = str(exc.value)
+        assert "do-not-leak" not in message, message
+        assert probe.split("/")[-1] in message, message
