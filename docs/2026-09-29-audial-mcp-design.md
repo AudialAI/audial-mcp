@@ -63,7 +63,7 @@ MCP client ──stdio──▶ audial-mcp (Python, mcp>=2.2 MCPServer)
                                  └── Audial API (api.audialmusic.ai) → hosted GPU workers
 ```
 
-- **Runtime:** Python ≥ 3.10 (mcp requires it), `mcp>=2.2,<3`, `audial-sdk>=1.2.2`.
+- **Runtime:** Python ≥ 3.10 (mcp requires it), `mcp>=2.2,<3`, `audial-sdk>=1.2.3`.
 - **Server object:** `mcp.server.MCPServer("audial", instructions=..., version=...)`.
   Tools are `async def` decorated with `@mcp.tool(title=..., annotations=ToolAnnotations(...))`;
   the JSON schema comes from type hints and `Annotated[..., Field(description=...)]`.
