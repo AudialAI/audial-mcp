@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "audial-mcp"
+version = "0.1.0"
+description = "MCP server for Audial: stem splitting, mastering, MIDI, music generation, resynthesis and vocal synthesis from any MCP client."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "Audial", email = "contact@audialmusic.ai" }]
+keywords = ["mcp", "audio", "music", "stems", "audial", "model-context-protocol"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: Multimedia :: Sound/Audio",
+]
+dependencies = [
+  "mcp>=2.2,<3",
+  "audial-sdk>=1.2.2",
+  "anyio>=4",
+  "pydantic>=2",
+]
+
+[project.urls]
+Homepage = "https://audialmusic.ai"
+Documentation = "https://audialmusic.ai/resources/api-reference"
+Repository = "https://github.com/AudialAI/audial-mcp"
+
+[project.scripts]
+audial-mcp = "audial_mcp.server:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "anyio>=4", "ruff>=0.6", "build>=1.2"]
+
+[tool.uv.sources]
+audial-sdk = { path = "../audial-sdk", editable = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/audial_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
