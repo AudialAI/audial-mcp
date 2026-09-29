@@ -1,9 +1,12 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.AudialAI/audial-mcp",
-  "description": "Stem splitting, analysis, mastering, sample packs, audio-to-MIDI, music generation, resynthesis and vocal synthesis with Audial's hosted engines.",
+  "description": "Audial audio tools: stems, analysis, mastering, sample packs, MIDI, music generation, vocals.",
   "version": "0.1.0",
-  "repository": { "url": "https://github.com/AudialAI/audial-mcp", "source": "github" },
+  "repository": {
+    "url": "https://github.com/AudialAI/audial-mcp",
+    "source": "github"
+  },
   "websiteUrl": "https://audialmusic.ai/resources/api-reference",
   "packages": [
     {
@@ -12,13 +15,38 @@
       "identifier": "audial-mcp",
       "version": "0.1.0",
       "runtimeHint": "uvx",
-      "transport": { "type": "stdio" },
+      "transport": {
+        "type": "stdio"
+      },
       "environmentVariables": [
-        { "name": "AUDIAL_USER_ID", "description": "Audial user id", "isRequired": true, "isSecret": false },
-        { "name": "AUDIAL_API_KEY", "description": "Audial API key", "isRequired": true, "isSecret": true },
-        { "name": "AUDIAL_RESULTS_DIR", "description": "Folder results are written to", "default": "~/Audial" },
-        { "name": "AUDIAL_JOB_TIMEOUT_S", "description": "Seconds to wait for a job before giving up", "default": "900" },
-        { "name": "AUDIAL_API_BASE_URL", "description": "Override the Audial API base URL (advanced)", "isRequired": false, "isSecret": false }
+        {
+          "name": "AUDIAL_USER_ID",
+          "description": "Audial user id",
+          "isRequired": true,
+          "isSecret": false
+        },
+        {
+          "name": "AUDIAL_API_KEY",
+          "description": "Audial API key",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "AUDIAL_RESULTS_DIR",
+          "description": "Folder results are written to",
+          "default": "~/Audial"
+        },
+        {
+          "name": "AUDIAL_JOB_TIMEOUT_S",
+          "description": "Seconds to wait for a job before giving up",
+          "default": "900"
+        },
+        {
+          "name": "AUDIAL_API_BASE_URL",
+          "description": "Override the Audial API base URL (advanced)",
+          "isRequired": false,
+          "isSecret": false
+        }
       ]
     }
   ]
