@@ -1,10 +1,9 @@
 import os
-from pathlib import Path
 
 import pytest
 
 from audial_mcp import BOOT_ENV
-from audial_mcp.config import ConfigError, Settings, fallback_settings, load_settings
+from audial_mcp.config import ConfigError, fallback_settings, load_settings
 
 
 def test_defaults_when_only_credentials_set(tmp_path, monkeypatch):
@@ -28,18 +27,10 @@ def test_timeout_parses_int_and_rejects_garbage():
         load_settings({"AUDIAL_JOB_TIMEOUT_S": "soon"})
 
 
-def test_require_credentials_message_names_both_variables():
+def test_credentials_are_optional():
+    """No key in the client config is a valid setup: the server signs in through the browser."""
     s = load_settings({})
-    with pytest.raises(ConfigError) as exc:
-        s.require_credentials()
-    assert "AUDIAL_USER_ID" in str(exc.value) and "AUDIAL_API_KEY" in str(exc.value)
-    assert "audialmusic.ai" in str(exc.value)
-
-
-def test_credentials_present_passes():
-    Settings(
-        user_id="u", api_key="k", results_dir=Path("/tmp"), api_base_url=None, job_timeout_s=1
-    ).require_credentials()
+    assert s.user_id is None and s.api_key is None
 
 
 def test_settings_ignore_the_live_environment_after_boot(monkeypatch):

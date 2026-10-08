@@ -13,12 +13,9 @@ from audial_mcp import BOOT_ENV
 DEFAULT_RESULTS_DIR = "~/Audial"
 DEFAULT_JOB_TIMEOUT_S = 900
 
-CREDENTIALS_HELP = (
-    "AUDIAL_USER_ID and AUDIAL_API_KEY are not set. Add both to the `audial` server's env in "
-    "your MCP client config (for Claude Code: `claude mcp add audial -e AUDIAL_USER_ID=... "
-    "-e AUDIAL_API_KEY=... -- uvx audial-mcp`). Get them from your dashboard at "
-    "https://audialmusic.ai, then restart the client."
-)
+# Seconds a tool call waits for the user to approve a sign-in in their browser before it
+# returns the link instead. An approval that arrives later is picked up by the next call.
+SIGN_IN_WAIT_S = 120
 
 
 class ConfigError(Exception):
@@ -27,15 +24,14 @@ class ConfigError(Exception):
 
 @dataclass(frozen=True)
 class Settings:
+    # Credentials from the client's config, for setups that pin an API key. Both are optional:
+    # without a key the server uses the sign-in saved on this machine (`audial login`, or the
+    # browser sign-in a tool call starts), and a key of the form aud_... needs no user id.
     user_id: str | None
     api_key: str | None
     results_dir: Path
     api_base_url: str | None
     job_timeout_s: int
-
-    def require_credentials(self) -> None:
-        if not self.user_id or not self.api_key:
-            raise ConfigError(CREDENTIALS_HELP)
 
 
 def _always_parseable(env: Mapping[str, str]) -> dict[str, Any]:

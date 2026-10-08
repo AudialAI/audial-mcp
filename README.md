@@ -8,15 +8,15 @@ mcp-name: io.github.AudialAI/audial-mcp
 
 ## Install
 
-You need an Audial account (user id + API key from https://audialmusic.ai) and
-[`uv`](https://docs.astral.sh/uv/getting-started/installation/).
+You need an Audial account (https://audialmusic.ai) and
+[`uv`](https://docs.astral.sh/uv/getting-started/installation/). There is no API key to copy:
+the first time a tool runs, a sign-in page opens in your browser. Approve it and the tool
+carries on.
 
 **Claude Code**
 
 ```bash
-claude mcp add audial \
-  -e AUDIAL_USER_ID=your-user-id -e AUDIAL_API_KEY=your-api-key -e AUDIAL_RESULTS_DIR=~/Audial \
-  -- uvx audial-mcp
+claude mcp add audial -e AUDIAL_RESULTS_DIR=~/Audial -- uvx audial-mcp
 ```
 
 **Claude Desktop / Cursor / any client with a JSON config**
@@ -28,14 +28,24 @@ claude mcp add audial \
       "command": "uvx",
       "args": ["audial-mcp"],
       "env": {
-        "AUDIAL_USER_ID": "your-user-id",
-        "AUDIAL_API_KEY": "your-api-key",
         "AUDIAL_RESULTS_DIR": "~/Audial"
       }
     }
   }
 }
 ```
+
+### Signing in
+
+The sign-in is saved on your computer (`~/.audial/credentials.json`, readable only by you) and
+shared with the `audial` command line and Python SDK, so `audial login` in a terminal signs
+the MCP server in too. If you have not approved within two minutes the tool returns the
+sign-in link instead; approve it and ask again. The `account`, `sign_in` and `sign_out` tools
+show and change who is signed in, and each connected computer is listed, and can be
+disconnected, under Apps & API Keys in your profile at audialmusic.ai.
+
+On a server or in CI, where nobody can sign in, set `AUDIAL_API_KEY` to a key created on that
+page. A key set this way takes priority over a saved sign-in.
 
 ## Tools
 
@@ -69,8 +79,8 @@ Every tool except `list_results` calls the Audial API, which requires an active 
 
 | Variable | Required | Default |
 |---|---|---|
-| `AUDIAL_USER_ID` | yes | |
-| `AUDIAL_API_KEY` | yes | |
+| `AUDIAL_API_KEY` | no | browser sign-in |
+| `AUDIAL_USER_ID` | no; only with an older API key that does not start with `aud_` | |
 | `AUDIAL_RESULTS_DIR` | no | `~/Audial` |
 | `AUDIAL_JOB_TIMEOUT_S` | no | `900` |
 | `AUDIAL_API_BASE_URL` | no | production API |

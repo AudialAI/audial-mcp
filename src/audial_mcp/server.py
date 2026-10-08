@@ -8,20 +8,30 @@ import os
 import re
 import sys
 import time
+import webbrowser
 from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Any
 
+import anyio
 import audial
+from audial.api import device_login
+from audial.utils import config as sdk_config
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from audial_mcp import __version__
-from audial_mcp.config import ConfigError, Settings, fallback_settings, load_settings
-from audial_mcp.errors import to_tool_error
+from audial_mcp.config import (
+    SIGN_IN_WAIT_S,
+    ConfigError,
+    Settings,
+    fallback_settings,
+    load_settings,
+)
+from audial_mcp.errors import SignInRequired, to_tool_error
 from audial_mcp.jobs import run_job
 from audial_mcp.results import JobResult, inventory, list_jobs, new_job_dir, slugify
 from audial_mcp.validation import (
@@ -40,7 +50,10 @@ INSTRUCTIONS = (
     "Jobs take from a few seconds (analyze) to a few minutes (stem_split, generate_music, "
     "sound2vital, text2vox); progress notifications report elapsed time. Some tools need an "
     "active Audial subscription for every tool except list_results; relay the error text if "
-    "one is returned."
+    "one is returned. No API key is needed: if the user is not signed in, the first tool call "
+    "opens a sign-in page in their browser and continues once they approve. If a tool instead "
+    "returns a sign-in link, give the user that link and the code, and retry when they say "
+    "they have approved it."
 )
 
 mcp = MCPServer("audial", instructions=INSTRUCTIONS, version=__version__)
@@ -96,9 +109,26 @@ SECRET_KEYS = frozenset(
 REDACTED = "<redacted>"
 
 
+# The browser sign-in in use, as last read from the credentials file by `_apply_credentials`.
+# Remembered so its key and user id are redacted from results like the configured ones.
+_signed_in: dict[str, Any] | None = None
+
+# A browser sign-in that has been started and not yet approved. Kept between tool calls so an
+# approval that arrives after one call stopped waiting is picked up by the next.
+_pending_sign_in: device_login.DeviceLogin | None = None
+_pending_sign_in_expires = 0.0
+
+
 def _secrets() -> tuple[str, ...]:
-    """The configured credential strings, longest first so the longer match wins."""
-    values = {v for v in (_settings.api_key, _settings.user_id) if v}
+    """The credential strings in use, longest first so the longer match wins."""
+    signed_in = _signed_in or {}
+    candidates = (
+        _settings.api_key,
+        _settings.user_id,
+        signed_in.get("api_key"),
+        signed_in.get("user_id"),
+    )
+    values = {v for v in candidates if v}
     return tuple(sorted(values, key=len, reverse=True))
 
 
@@ -130,7 +160,10 @@ def _tool_error(exc: BaseException, *, tool: str, execution_id: str | None = Non
 
     Upstream error text can quote the request it failed on, which may carry the user id.
     """
-    return ToolError(_redact_text(str(to_tool_error(exc, tool=tool, execution_id=execution_id))))
+    error = to_tool_error(
+        exc, tool=tool, execution_id=execution_id, api_key_from_env=bool(_settings.api_key)
+    )
+    return ToolError(_redact_text(str(error)))
 
 
 def _metadata(raw: Any) -> dict[str, Any]:
@@ -168,15 +201,75 @@ def _discard_if_empty(folder: Path) -> None:
             parent.rmdir()
 
 
-def _apply_credentials() -> None:
-    """Put the configured credentials where the SDK reads them. Never logged."""
-    _settings.require_credentials()
+def _saved_sign_in() -> dict[str, Any] | None:
+    """The browser sign-in saved on this machine for the configured API, if any."""
+    global _signed_in
     if _settings.api_base_url:
         os.environ["AUDIAL_API_BASE_URL"] = _settings.api_base_url
     else:
         os.environ.pop("AUDIAL_API_BASE_URL", None)
-    os.environ["AUDIAL_USER_ID"] = _settings.user_id or ""
-    os.environ["AUDIAL_API_KEY"] = _settings.api_key or ""
+    _signed_in = sdk_config.load_credentials()
+    return _signed_in
+
+
+async def _sign_in(ctx: Context) -> dict[str, Any]:
+    """Sign the user in through their browser and wait for them to approve.
+
+    Opens the approval page, reports the link as progress, and polls. If the user has not
+    approved within SIGN_IN_WAIT_S the link is raised as `SignInRequired`; the sign-in stays
+    pending, so calling again after approving succeeds at once.
+    """
+    global _pending_sign_in, _pending_sign_in_expires, _signed_in
+    pending = _pending_sign_in if time.monotonic() < _pending_sign_in_expires else None
+    if pending is None:
+        pending = await anyio.to_thread.run_sync(device_login.start_device_login, "audial-mcp")
+        _pending_sign_in = pending
+        _pending_sign_in_expires = time.monotonic() + pending.expires_in
+        # Best effort: over SSH or in a container there is no browser, and the link below
+        # is what the user gets.
+        with contextlib.suppress(Exception):
+            await anyio.to_thread.run_sync(webbrowser.open, pending.verification_uri_complete)
+
+    url, code = pending.verification_uri_complete, pending.user_code
+    message = f"Sign in to Audial: open {url} and approve (the page should show code {code})"
+    log.info("%s", message)
+    deadline = time.monotonic() + SIGN_IN_WAIT_S
+    while True:
+        with contextlib.suppress(Exception):
+            await ctx.report_progress(0, message=message)
+        try:
+            credentials = await anyio.to_thread.run_sync(device_login.poll_device_login, pending)
+        except Exception:
+            _pending_sign_in = None  # refused or expired: the next call starts a fresh one
+            raise
+        if credentials:
+            _pending_sign_in = None
+            _signed_in = credentials
+            log.info("signed in to Audial")
+            return credentials
+        if time.monotonic() + pending.interval > deadline:
+            raise SignInRequired(url, code)
+        await anyio.sleep(max(pending.interval, 0.01))
+
+
+async def _apply_credentials(ctx: Context) -> None:
+    """Put the credentials to use where the SDK reads them, signing in first if there are none.
+
+    An API key in the client's config wins. Without one the SDK reads the sign-in saved on this
+    machine, which this starts (in the browser) when it does not exist yet. Never logged.
+    """
+    saved = _saved_sign_in()
+    if _settings.api_key:
+        os.environ["AUDIAL_API_KEY"] = _settings.api_key
+        if _settings.user_id:
+            os.environ["AUDIAL_USER_ID"] = _settings.user_id
+        else:
+            os.environ.pop("AUDIAL_USER_ID", None)
+        return
+    os.environ.pop("AUDIAL_API_KEY", None)
+    os.environ.pop("AUDIAL_USER_ID", None)
+    if saved is None:
+        await _sign_in(ctx)
 
 
 async def _execute(ctx: Context, tool: str, plan: Plan) -> JobResult:
@@ -187,7 +280,7 @@ async def _execute(ctx: Context, tool: str, plan: Plan) -> JobResult:
     output_dir: Path | None = None
     try:
         slug, call = plan()
-        _apply_credentials()
+        await _apply_credentials(ctx)
         output_dir = new_job_dir(_settings.results_dir, tool, slug)
         started = time.monotonic()
         log.info("%s: starting; results -> %s", tool, output_dir)
@@ -669,6 +762,94 @@ async def list_results(
         raise _tool_error(exc, tool="list_results") from None
 
 
+class Account(BaseModel):
+    """Which Audial account this server is using."""
+
+    signed_in: bool
+    email: str | None = None
+    source: str | None = Field(
+        default=None, description="Where the credentials come from: 'sign-in' or 'api-key'."
+    )
+    summary: str
+
+
+API_KEY_CONFIGURED = (
+    "This server is configured with an API key (AUDIAL_API_KEY in its env), which takes "
+    "priority. Remove it from the MCP client's config and restart to use browser sign-in."
+)
+
+
+def _account() -> Account:
+    saved = _saved_sign_in()
+    if _settings.api_key:
+        return Account(
+            signed_in=True,
+            source="api-key",
+            summary="Using the API key from the server's configuration.",
+        )
+    if saved:
+        who = saved.get("email") or "your Audial account"
+        return Account(
+            signed_in=True,
+            email=saved.get("email"),
+            source="sign-in",
+            summary=f"Signed in as {who}.",
+        )
+    return Account(
+        signed_in=False,
+        summary="Not signed in. Call sign_in, or any Audial tool, to sign in through the browser.",
+    )
+
+
+@mcp.tool(title="Show the Audial account in use", annotations=LOCAL_READ_ONLY)
+async def account() -> Account:
+    """Show whether this computer is signed in to Audial, and as whom."""
+    try:
+        return _account()
+    except Exception as exc:  # noqa: BLE001 — every failure becomes a ToolError
+        raise _tool_error(exc, tool="account") from None
+
+
+@mcp.tool(title="Sign in to Audial", annotations=REMOTE)
+async def sign_in(
+    ctx: Context,
+    switch_account: Annotated[
+        bool,
+        Field(description="Sign out first and sign in again, to change or repair the account."),
+    ] = False,
+) -> Account:
+    """Sign in to Audial through the user's browser. Opens an approval page and waits for it.
+
+    Not needed before other tools: they start the same sign-in when nobody is signed in.
+    """
+    try:
+        if _settings.api_key:
+            raise ConfigError(API_KEY_CONFIGURED)
+        if switch_account:
+            _saved_sign_in()
+            await anyio.to_thread.run_sync(device_login.logout)
+        if _saved_sign_in() is None:
+            await _sign_in(ctx)
+        return _account()
+    except Exception as exc:  # noqa: BLE001 — every failure becomes a ToolError
+        raise _tool_error(exc, tool="sign_in") from None
+
+
+@mcp.tool(title="Sign out of Audial", annotations=REMOTE)
+async def sign_out() -> Account:
+    """Sign out of Audial on this computer and disconnect it from the account."""
+    global _pending_sign_in
+    try:
+        if _settings.api_key:
+            raise ConfigError(API_KEY_CONFIGURED)
+        _saved_sign_in()
+        _pending_sign_in = None
+        await anyio.to_thread.run_sync(device_login.logout)
+        return _account()
+    except Exception as exc:  # noqa: BLE001 — every failure becomes a ToolError
+        raise _tool_error(exc, tool="sign_out") from None
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO, stream=sys.stderr, format="%(levelname)s %(name)s: %(message)s"
@@ -684,7 +865,7 @@ def main() -> None:
         "audial-mcp %s; results dir %s; credentials %s",
         __version__,
         _settings.results_dir,
-        "present" if _settings.user_id and _settings.api_key else "MISSING",
+        "API key from env" if _settings.api_key else "browser sign-in",
     )
     if _startup_error is not None:
         # Serve anyway: the client sees a working server whose tools all explain this.
