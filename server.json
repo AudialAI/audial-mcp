@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.AudialAI/audial-mcp",
   "description": "Audial audio tools: stems, analysis, mastering, sample packs, MIDI, music generation, vocals.",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "repository": {
     "url": "https://github.com/AudialAI/audial-mcp",
     "source": "github"
@@ -13,7 +13,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "audial-mcp",
-      "version": "0.1.1",
+      "version": "0.2.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
@@ -21,14 +21,14 @@
       "environmentVariables": [
         {
           "name": "AUDIAL_USER_ID",
-          "description": "Audial user id",
-          "isRequired": true,
+          "description": "Audial user id. Only needed with an older API key that does not start with aud_.",
+          "isRequired": false,
           "isSecret": false
         },
         {
           "name": "AUDIAL_API_KEY",
-          "description": "Audial API key",
-          "isRequired": true,
+          "description": "Audial API key, for servers and CI. Leave unset to sign in through the browser on first use.",
+          "isRequired": false,
           "isSecret": true
         },
         {

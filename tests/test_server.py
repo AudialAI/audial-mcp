@@ -7,7 +7,9 @@ from pathlib import Path
 
 import audial
 import pytest
+from audial.api import device_login
 from audial.api.exceptions import AudialError
+from audial.utils import config as sdk_config
 from mcp import Client
 
 import audial_mcp.server as server_mod
@@ -24,6 +26,9 @@ TOOLS = {
     "sound2vital",
     "text2vox",
     "list_results",
+    "account",
+    "sign_in",
+    "sign_out",
 }
 
 
@@ -97,12 +102,132 @@ async def test_stem_split_maps_args_and_inventories_output(client, settings, wav
     assert kwargs["target_bpm"] == 90 and kwargs["results_folder"] == data["output_dir"]
 
 
+PENDING = device_login.DeviceLogin(
+    device_code="dc",
+    user_code="BCDF-GHJK",
+    verification_uri="https://audialmusic.ai/activate",
+    verification_uri_complete="https://audialmusic.ai/activate?code=BCDF-GHJK",
+    expires_in=600,
+    interval=0,
+)
+SIGNED_IN_KEY = "aud_0123456789abcdef_" + "s" * 32
+
+
+@pytest.fixture
+def signed_out(settings, monkeypatch):
+    """A server with no API key in its config, as installed without any setup."""
+    s = Settings(None, None, settings.results_dir, None, 5)
+    monkeypatch.setattr(server_mod, "_settings", s)
+    return s
+
+
+def fake_sign_in(monkeypatch, *, approve_after):
+    """Stand in for the Audial API: the user approves on poll number `approve_after`."""
+    seen = {"started": 0, "polls": 0}
+
+    def start(client_name):
+        seen["started"] += 1
+        seen["client_name"] = client_name
+        return PENDING
+
+    def poll(_pending):
+        seen["polls"] += 1
+        if seen["polls"] < approve_after:
+            return None
+        return sdk_config.save_credentials(
+            api_key=SIGNED_IN_KEY, user_id="user-1", email="a@b.c", key_name="Audial MCP on host"
+        )
+
+    monkeypatch.setattr(server_mod.device_login, "start_device_login", start)
+    monkeypatch.setattr(server_mod.device_login, "poll_device_login", poll)
+    return seen
+
+
 @pytest.mark.anyio
-async def test_missing_credentials_is_a_readable_error(client, monkeypatch, wav, settings):
-    monkeypatch.setattr(
-        server_mod, "_settings", Settings(None, None, settings.results_dir, None, 5)
-    )
+async def test_first_call_signs_in_through_the_browser_and_then_runs(
+    client, signed_out, monkeypatch, wav
+):
+    opened = []
+    monkeypatch.setattr(server_mod.webbrowser, "open", opened.append)
+    seen = fake_sign_in(monkeypatch, approve_after=2)
+    used = {}
+
+    def analyze(*_args, **kwargs):
+        # What the SDK would authenticate with at this point.
+        used["key"], used["user"] = sdk_config.get_api_key(), sdk_config.get_user_id()
+        (Path(kwargs["results_folder"]) / "analysis.json").write_bytes(b"{}")
+        return {"execution": {"exeId": "e1"}, "echo": SIGNED_IN_KEY}
+
+    monkeypatch.setattr(audial, "analyze", analyze)
     result = await client.call_tool("analyze", {"file_path": str(wav)})
+
+    assert not result.is_error
+    assert opened == [PENDING.verification_uri_complete]
+    assert seen["started"] == 1 and seen["client_name"] == "audial-mcp" and seen["polls"] == 2
+    assert used == {"key": SIGNED_IN_KEY, "user": "user-1"}
+    # The key the sign-in issued is treated as a secret like a configured one.
+    assert SIGNED_IN_KEY not in json.dumps(result.structured_content)
+
+
+@pytest.mark.anyio
+async def test_unapproved_sign_in_returns_the_link_and_is_resumed_by_the_next_call(
+    client, signed_out, monkeypatch, wav
+):
+    monkeypatch.setattr(server_mod, "SIGN_IN_WAIT_S", 0)
+    seen = fake_sign_in(monkeypatch, approve_after=2)
+    fake_sdk(monkeypatch, "analyze", produce=("analysis.json",))
+
+    first = await client.call_tool("analyze", {"file_path": str(wav)})
+    text = first.content[0].text
+    assert first.is_error and PENDING.verification_uri_complete in text and "BCDF-GHJK" in text
+
+    second = await client.call_tool("analyze", {"file_path": str(wav)})
+    assert not second.is_error
+    assert seen["started"] == 1  # the same sign-in, not a new code
+
+
+@pytest.mark.anyio
+async def test_a_configured_api_key_is_used_without_any_sign_in(client, settings, monkeypatch, wav):
+    sdk_config.save_credentials(api_key=SIGNED_IN_KEY, user_id="user-1")
+    used = {}
+
+    def analyze(*_args, **kwargs):
+        used["key"], used["user"] = (
+            os.environ.get("AUDIAL_API_KEY"),
+            os.environ.get("AUDIAL_USER_ID"),
+        )
+        (Path(kwargs["results_folder"]) / "analysis.json").write_bytes(b"{}")
+        return {}
+
+    monkeypatch.setattr(audial, "analyze", analyze)
+    result = await client.call_tool("analyze", {"file_path": str(wav)})
+    assert not result.is_error and used == {"key": "k1", "user": "u1"}
+
+
+@pytest.mark.anyio
+async def test_account_and_sign_out(client, signed_out, monkeypatch):
+    before = await client.call_tool("account", {})
+    assert before.structured_content["signed_in"] is False
+
+    sdk_config.save_credentials(api_key=SIGNED_IN_KEY, user_id="user-1", email="a@b.c")
+    during = await client.call_tool("account", {})
+    assert during.structured_content["signed_in"] is True
+    assert during.structured_content["email"] == "a@b.c"
+    assert SIGNED_IN_KEY not in json.dumps(during.structured_content)
+
+    revoked = []
+    monkeypatch.setattr(
+        device_login.requests, "post", lambda url, **kw: revoked.append((url, kw["headers"]))
+    )
+    after = await client.call_tool("sign_out", {})
+    assert after.structured_content["signed_in"] is False
+    assert revoked[0][0].endswith("/auth/revoke") and revoked[0][1]["x-api-key"] == SIGNED_IN_KEY
+    assert sdk_config.load_credentials() is None
+
+
+@pytest.mark.anyio
+async def test_sign_in_tool_is_refused_when_an_api_key_is_configured(client, settings):
+    result = await client.call_tool("sign_in", {})
     assert result.is_error and "AUDIAL_API_KEY" in result.content[0].text
 
 
