@@ -1,8 +1,10 @@
 # audial-mcp
 
-Run Audial's hosted audio tools from any MCP client: split stems, analyze and segment audio,
-master tracks, build sample packs, convert audio to MIDI, generate music, turn a one-shot into
-an editable Audial Synth preset, and sing lyrics in a reference voice.
+Powered by [Audial](https://audialmusic.ai) — run Audial's hosted audio tools from any MCP
+client: split stems, analyze and segment audio, master tracks, build sample packs, convert
+audio to MIDI, generate music, turn a one-shot into an editable Audial Synth preset, and sing
+lyrics in a reference voice. See the [API reference](https://audialmusic.ai/resources/api-reference)
+for details on what each tool calls.
 
 mcp-name: io.github.AudialAI/audial-mcp
 
