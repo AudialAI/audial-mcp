@@ -1,0 +1,35 @@
+# Smithery configuration file: https://smithery.ai/docs
+# audial-mcp is a local stdio server published on PyPI; it runs via uvx.
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    required: [audialUserId, audialApiKey]
+    properties:
+      audialUserId:
+        type: string
+        title: Audial user ID
+        description: Your Audial user ID (dashboard at https://audialmusic.ai).
+      audialApiKey:
+        type: string
+        title: Audial API key
+        description: Your Audial API key (dashboard at https://audialmusic.ai).
+      resultsDir:
+        type: string
+        title: Results folder
+        description: Folder results are written to.
+        default: "~/Audial"
+  commandFunction: |-
+    (config) => ({
+      command: 'uvx',
+      args: ['audial-mcp'],
+      env: {
+        AUDIAL_USER_ID: config.audialUserId,
+        AUDIAL_API_KEY: config.audialApiKey,
+        AUDIAL_RESULTS_DIR: config.resultsDir || '~/Audial'
+      }
+    })
+  exampleConfig:
+    audialUserId: your-user-id
+    audialApiKey: your-api-key
+    resultsDir: "~/Audial"
