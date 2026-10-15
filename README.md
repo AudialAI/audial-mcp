@@ -1,5 +1,7 @@
 # audial-mcp
 
+[![AllMCPs Verified](https://allmcps.com/api/badge/audial)](https://allmcps.com/mcp/audial?verify=52eebd0d-00d9-4ea1-8c87-d53f1b8aab03)
+
 Powered by [Audial](https://audialmusic.ai) — run Audial's hosted audio tools from any MCP
 client: split stems, analyze and segment audio, master tracks, build sample packs, convert
 audio to MIDI, generate music, turn a one-shot into an editable Audial Synth preset, and sing
