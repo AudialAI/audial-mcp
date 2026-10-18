@@ -25,8 +25,15 @@ async def run_job(
     *,
     timeout_s: float,
     heartbeat_s: float = 5.0,
+    relay: Any | None = None,
+    relay_interval_s: float = 0.5,
 ) -> T:
-    """Run `fn` in a worker thread; report elapsed seconds as progress until it returns."""
+    """Run `fn` in a worker thread; report elapsed seconds as progress until it returns.
+
+    `relay` is an optional `pipelines.StepRelay`: `fn` fills it from the worker
+    thread and it is drained here, on the event loop, so step changes reach the
+    client while the job is still running.
+    """
     started = time.monotonic()
 
     async def heartbeat() -> None:
@@ -40,6 +47,11 @@ async def run_job(
                 await ctx.report_progress(elapsed, message=f"{label}: {elapsed} s elapsed")
             except Exception:
                 return
+
+    async def forward() -> None:
+        while True:
+            await anyio.sleep(relay_interval_s)
+            await relay.drain(ctx)
 
     # Exceptions (other than cancellation) are caught here rather than left to
     # propagate out of the `async with` block: anyio's TaskGroup.__aexit__
@@ -58,6 +70,8 @@ async def run_job(
     result: T | None = None
     async with anyio.create_task_group() as tg:
         tg.start_soon(heartbeat)
+        if relay is not None:
+            tg.start_soon(forward)
         with anyio.move_on_after(timeout_s) as scope:
             try:
                 # Cancelling to_thread does not stop the thread; it finishes quietly.
@@ -65,6 +79,10 @@ async def run_job(
             except Exception as exc:
                 error = exc
         tg.cancel_scope.cancel()
+    # Outside the task group, so this await is not cancelled: whatever the job
+    # queued just before it finished (or failed) still gets reported.
+    if relay is not None:
+        await relay.drain(ctx)
     if scope.cancelled_caught:
         raise JobTimeout(label, time.monotonic() - started)
     if error is not None:

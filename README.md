@@ -47,14 +47,21 @@ claude mcp add audial \
 |---|---|
 | `stem_split` | Split a track into vocals, drums, bass, other (optionally retime / rekey) |
 | `analyze` | BPM, key and other characteristics |
-| `segment` | Sections and component analysis |
+| `segment` | Sections and component analysis -- splits stems, then segments them; one call |
 | `master` | Mastering, optionally matched to a reference |
-| `generate_samples` | Sample pack from a track |
+| `generate_samples` | Sample pack from a track -- splits stems, then builds the pack; one call |
 | `generate_midi` | Audio to MIDI |
 | `generate_music` | Text to music, covers, remixes, extraction, completion with the Audial music model |
 | `sound2vital` | One-shot → editable Audial Synth (Vital) preset |
 | `text2vox` | Lyrics + reference voice → sung vocal and MIDI |
+| `pipeline_status` | Look up a pipeline by id: its state, each step, and the outputs so far |
 | `list_results` | Browse previous results in your results folder |
+
+`segment` and `generate_samples` run as Audial *pipelines*: both need separated stems, so the
+API splits stems and then runs the step you asked for as one job. Each step is reported as it
+starts and finishes ("stem-split completed in 41 s; sample-pack running"), and the pipeline id
+comes back as the result's `execution_id` -- pass it to `pipeline_status` to check on a job
+whose call timed out.
 
 ## What leaves your machine
 
