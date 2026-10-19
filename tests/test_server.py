@@ -25,6 +25,7 @@ TOOLS = {
     "generate_music",
     "sound2vital",
     "text2vox",
+    "pipeline_status",
     "list_results",
     "account",
     "sign_in",

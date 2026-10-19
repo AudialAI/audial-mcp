@@ -13,3 +13,8 @@ __version__ = "0.2.0"
 # (importing a submodule initialises its package first), so this snapshot predates that call.
 # `config.load_settings()` reads from here rather than from the live `os.environ`.
 BOOT_ENV: dict[str, str] = dict(os.environ)
+
+# Name this client to the Audial API. The SDK reads AUDIAL_CLIENT when it builds request
+# headers (User-Agent / x-audial-client), so executions started from here are attributed to
+# the MCP server rather than to the SDK. Set before `audial` is imported anywhere.
+os.environ.setdefault("AUDIAL_CLIENT", f"audial-mcp/{__version__}")

@@ -33,6 +33,7 @@ from audial_mcp.config import (
 )
 from audial_mcp.errors import SignInRequired, to_tool_error
 from audial_mcp.jobs import run_job
+from audial_mcp.pipelines import StepRelay
 from audial_mcp.results import JobResult, inventory, list_jobs, new_job_dir, slugify
 from audial_mcp.validation import (
     AUDIO_EXTENSIONS,
@@ -48,7 +49,10 @@ INSTRUCTIONS = (
     "Audial runs hosted audio tools. Give tools full local file paths. Results are written to "
     "the user's Audial results folder and returned as file paths; tell the user where they are. "
     "Jobs take from a few seconds (analyze) to a few minutes (stem_split, generate_music, "
-    "sound2vital, text2vox); progress notifications report elapsed time. Some tools need an "
+    "sound2vital, text2vox); progress notifications report elapsed time. segment and "
+    "generate_samples run as pipelines -- they split stems first and then do the step asked "
+    "for, in one call -- and report each step as it starts and finishes; pipeline_status looks "
+    "one up again by id. Some tools need an "
     "active Audial subscription for every tool except list_results; relay the error text if "
     "one is returned. No API key is needed: if the user is not signed in, the first tool call "
     "opens a sign-in page in their browser and continues once they approve. If a tool instead "
@@ -88,12 +92,14 @@ Plan = Callable[[], tuple[str, Callable[[Path], Any]]]
 def _execution_id(raw: Any) -> str | None:
     if not isinstance(raw, dict):
         return None
-    for key in ("execution_id", "exe_id", "exeId"):
+    for key in ("execution_id", "exe_id", "exeId", "pipelineId", "pipeline_id"):
         if isinstance(raw.get(key), str):
             return raw[key]
     execution = raw.get("execution")
     if isinstance(execution, dict):
-        for key in ("exeId", "exe_id", "execution_id"):
+        # A pipeline reports a pipelineId instead of a single execution id; it
+        # is what `pipeline_status` takes, so it belongs in the same field.
+        for key in ("exeId", "exe_id", "execution_id", "pipelineId", "pipeline_id"):
             if isinstance(execution.get(key), str):
                 return execution[key]
     return None
@@ -272,8 +278,14 @@ async def _apply_credentials(ctx: Context) -> None:
         await _sign_in(ctx)
 
 
-async def _execute(ctx: Context, tool: str, plan: Plan) -> JobResult:
-    """Common path: validate → credentials → job folder → run in thread → inventory → JobResult."""
+async def _execute(
+    ctx: Context, tool: str, plan: Plan, relay: StepRelay | None = None
+) -> JobResult:
+    """Common path: validate → credentials → job folder → run in thread → inventory → JobResult.
+
+    `relay` is passed by the pipeline tools: the SDK fills it from the worker
+    thread with each step change and `run_job` drains it to the client.
+    """
     if _startup_error is not None:
         raise ToolError(str(_startup_error))
     execution_id: str | None = None
@@ -285,7 +297,13 @@ async def _execute(ctx: Context, tool: str, plan: Plan) -> JobResult:
         started = time.monotonic()
         log.info("%s: starting; results -> %s", tool, output_dir)
         await ctx.report_progress(0, message=f"{tool}: starting; results -> {output_dir}")
-        raw = await run_job(ctx, tool, lambda: call(output_dir), timeout_s=_settings.job_timeout_s)
+        raw = await run_job(
+            ctx,
+            tool,
+            lambda: call(output_dir),
+            timeout_s=_settings.job_timeout_s,
+            relay=relay,
+        )
         execution_id = _execution_id(raw)
         files = inventory(output_dir)
         elapsed = int(time.monotonic() - started)
@@ -395,7 +413,12 @@ async def segment(
         Field(description="Genre hint that improves section detection."),
     ] = None,
 ) -> JobResult:
-    """Detect song sections (intro, verse, chorus...) and analyze components within them."""
+    """Detect song sections (intro, verse, chorus...) and analyze components within them.
+
+    Runs the `segmentation` pipeline: splits stems, then segments them; one call. Tempo and
+    key are detected automatically. Each step is reported as it starts and finishes.
+    """
+    relay = StepRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
         src = check_file(file_path, AUDIO_EXTENSIONS, "audio file")
@@ -406,9 +429,10 @@ async def segment(
             features=features,
             genre=genre,
             results_folder=str(out),
+            on_progress=relay.on_progress,
         )
 
-    return await _execute(ctx, "segment", plan)
+    return await _execute(ctx, "segment", plan, relay=relay)
 
 
 @mcp.tool(title="Master a track", annotations=REMOTE)
@@ -460,7 +484,12 @@ async def generate_samples(
     ] = None,
     genre: Annotated[str | None, Field(description="Genre hint.")] = None,
 ) -> JobResult:
-    """Extract a sample pack (one-shots and loops) from a track."""
+    """Extract a sample pack (one-shots and loops) from a track.
+
+    Runs the `sample-pack` pipeline: splits stems, then builds the sample pack; one call.
+    Tempo and key are detected automatically. Each step is reported as it starts and finishes.
+    """
+    relay = StepRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
         src = check_file(file_path, AUDIO_EXTENSIONS, "audio file")
@@ -470,9 +499,10 @@ async def generate_samples(
             components=components,
             genre=genre,
             results_folder=str(out),
+            on_progress=relay.on_progress,
         )
 
-    return await _execute(ctx, "generate_samples", plan)
+    return await _execute(ctx, "generate_samples", plan, relay=relay)
 
 
 @mcp.tool(title="Audio to MIDI", annotations=REMOTE)
@@ -740,6 +770,42 @@ async def text2vox(
         )
 
     return await _execute(ctx, "text2vox", plan)
+
+
+# Pipeline ids are Firebase push keys; the id is interpolated into the request path, so it is
+# checked before it leaves here rather than trusted because the model supplied it.
+_PIPELINE_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
+@mcp.tool(title="Pipeline status", annotations=READ_ONLY_REMOTE)
+async def pipeline_status(
+    pipeline_id: Annotated[
+        str,
+        Field(
+            description=(
+                "Id of a pipeline, as returned in `execution_id` by segment or generate_samples."
+            )
+        ),
+    ],
+) -> dict[str, Any]:
+    """Look up an Audial pipeline by id: its state, each step, and the outputs so far.
+
+    Useful when a segment or generate_samples call timed out: the pipeline keeps running on
+    Audial's side and this says how far it got.
+    """
+    if _startup_error is not None:
+        raise ToolError(str(_startup_error))
+    try:
+        if not _PIPELINE_ID_RE.fullmatch(pipeline_id):
+            raise ValidationError(
+                f"{pipeline_id!r} is not a pipeline id (letters, digits, '_' and '-' only). "
+                "Use the execution_id a segment or generate_samples result returned."
+            )
+        _apply_credentials()
+        status = await anyio.to_thread.run_sync(lambda: audial.pipelines.get(pipeline_id))
+        return _redact(status) if isinstance(status, dict) else {"result": _redact(status)}
+    except Exception as exc:  # noqa: BLE001 — every failure becomes a ToolError
+        raise _tool_error(exc, tool="pipeline_status") from None
 
 
 @mcp.tool(title="List previous results", annotations=LOCAL_READ_ONLY)
