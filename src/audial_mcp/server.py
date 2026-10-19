@@ -779,6 +779,7 @@ _PIPELINE_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 @mcp.tool(title="Pipeline status", annotations=READ_ONLY_REMOTE)
 async def pipeline_status(
+    ctx: Context,
     pipeline_id: Annotated[
         str,
         Field(
@@ -801,7 +802,7 @@ async def pipeline_status(
                 f"{pipeline_id!r} is not a pipeline id (letters, digits, '_' and '-' only). "
                 "Use the execution_id a segment or generate_samples result returned."
             )
-        _apply_credentials()
+        await _apply_credentials(ctx)
         status = await anyio.to_thread.run_sync(lambda: audial.pipelines.get(pipeline_id))
         return _redact(status) if isinstance(status, dict) else {"result": _redact(status)}
     except Exception as exc:  # noqa: BLE001 — every failure becomes a ToolError
