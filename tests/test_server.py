@@ -7,7 +7,7 @@ from pathlib import Path
 
 import audial
 import pytest
-from audial.api.exceptions import AudialError
+from audial.api.exceptions import AudialError, AudialValidationError
 from mcp import Client
 
 import audial_mcp.server as server_mod
@@ -24,6 +24,7 @@ TOOLS = {
     "sound2vital",
     "text2vox",
     "pipeline_status",
+    "service_status",
     "list_results",
 }
 
@@ -365,3 +366,111 @@ async def test_tool_kwargs_bind_to_the_real_sdk_signatures(client, tmp_path, wav
         assert not result.is_error, f"{name}: {result.content[0].text}"
         _, kwargs = calls[0]
         inspect.signature(real).bind(**kwargs)
+
+
+# ---------------------------------------------------------------------------
+# text2vox: per-note lyrics
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_text2vox_describes_the_per_note_hold_grammar(client):
+    """The model has to be able to write a per-note string without guessing."""
+    described = {t.name: t for t in (await client.list_tools()).tools}
+    schema = described["text2vox"].input_schema["properties"]
+
+    mode = schema["lyrics_mode"]["description"]
+    assert "per_note" in mode and "one token per MIDI" in mode
+    # Every accepted spelling of a hold, and what a hold means.
+    assert "hold" in mode.lower()
+    assert "'-'" in mode and "'+'" in mode and "empty token" in mode
+    assert "amazing|-|-|grace" in mode
+    # The two rules, and the absence of a rest token.
+    assert "no rest token" in mode
+    assert "count" in mode and "first token" in mode
+    assert "amazing|-|-|grace" in schema["lyrics"]["description"]
+
+
+@pytest.mark.anyio
+async def test_unsingable_per_note_lyrics_come_back_with_the_position(
+    client, settings, tmp_path, monkeypatch
+):
+    """The SDK refuses these before uploading; the tool must relay message and position."""
+    ref = tmp_path / "voice.wav"
+    ref.write_bytes(b"0")
+    mid = tmp_path / "melody.mid"
+    mid.write_bytes(b"0")
+
+    def boom(*args, **kwargs):
+        raise AudialValidationError("note 1 has no syllable; the first note needs one", position=1)
+
+    monkeypatch.setattr(server_mod.audial, "text2vox", boom)
+
+    result = await client.call_tool(
+        "text2vox",
+        {
+            "reference_file": str(ref),
+            "lyrics": "-|grace",
+            "midi_file": str(mid),
+            "lyrics_mode": "per_note",
+        },
+    )
+    assert result.is_error
+    text = result.content[0].text
+    assert "note 1 has no syllable; the first note needs one" in text
+    assert "position 1" in text
+
+
+@pytest.mark.anyio
+async def test_the_apis_lyrics_invalid_response_reaches_the_model(
+    client, settings, tmp_path, monkeypatch
+):
+    """The token-count rule needs the MIDI, so it is the API's; it looks the same here."""
+    ref = tmp_path / "voice.wav"
+    ref.write_bytes(b"0")
+    mid = tmp_path / "melody.mid"
+    mid.write_bytes(b"0")
+
+    def boom(*args, **kwargs):
+        raise AudialValidationError(
+            "9 tokens for 10 notes; the first unmatched note starts at 2.4 s", position=10
+        )
+
+    monkeypatch.setattr(server_mod.audial, "text2vox", boom)
+
+    result = await client.call_tool(
+        "text2vox",
+        {
+            "reference_file": str(ref),
+            "lyrics": "a|ma|zing|grace|-|how|sweet|the|sound",
+            "midi_file": str(mid),
+            "lyrics_mode": "per_note",
+        },
+    )
+    assert result.is_error
+    assert "9 tokens for 10 notes" in result.content[0].text
+    assert "position 10" in result.content[0].text
+
+
+@pytest.mark.anyio
+async def test_per_note_lyrics_are_passed_through_unchanged(
+    client, settings, tmp_path, monkeypatch
+):
+    ref = tmp_path / "voice.wav"
+    ref.write_bytes(b"0")
+    mid = tmp_path / "melody.mid"
+    mid.write_bytes(b"0")
+    calls = fake_sdk(monkeypatch, "text2vox", produce=("song.wav",))
+
+    result = await client.call_tool(
+        "text2vox",
+        {
+            "reference_file": str(ref),
+            "lyrics": "amazing|-|-|grace|-|how|sweet|the|sound",
+            "midi_file": str(mid),
+            "lyrics_mode": "per_note",
+        },
+    )
+    assert not result.is_error, result.content[0].text
+    assert calls[0][1]["lyrics"] == "amazing|-|-|grace|-|how|sweet|the|sound"
+    assert calls[0][1]["lyrics_mode"] == "per_note"

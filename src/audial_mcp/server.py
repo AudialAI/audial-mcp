@@ -14,6 +14,7 @@ from typing import Annotated, Any
 
 import anyio
 import audial
+from audial.api.constants import STATUS_FUNCTIONS
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ToolError
@@ -24,7 +25,7 @@ from audial_mcp import __version__
 from audial_mcp.config import ConfigError, Settings, fallback_settings, load_settings
 from audial_mcp.errors import to_tool_error
 from audial_mcp.jobs import run_job
-from audial_mcp.pipelines import StepRelay
+from audial_mcp.progress import ProgressRelay
 from audial_mcp.results import JobResult, inventory, list_jobs, new_job_dir, slugify
 from audial_mcp.validation import (
     AUDIO_EXTENSIONS,
@@ -43,7 +44,10 @@ INSTRUCTIONS = (
     "sound2vital, text2vox); progress notifications report elapsed time. segment and "
     "generate_samples run as pipelines -- they split stems first and then do the step asked "
     "for, in one call -- and report each step as it starts and finishes; pipeline_status looks "
-    "one up again by id. Some tools need an "
+    "one up again by id. Audial's GPU workers scale to zero, so the first job after an idle "
+    "period spends a few extra minutes starting one: that shows up as a 'Warming up the "
+    "machine' progress line, which is worth relaying to the user as the reason for the wait, "
+    "and service_status says in advance which tools are warm. Some tools need an "
     "active Audial subscription for every tool except list_results; relay the error text if "
     "one is returned."
 )
@@ -62,6 +66,11 @@ except ConfigError as exc:
     _startup_error = exc
 
 _TOOL_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+# GET /functions/status reports each function under the API's own name
+# ("sample-pack"); the SDK accepts either spelling and `service_status` takes
+# both, so a model that read a status document back can ask about what it saw.
+_API_FUNCTIONS = frozenset(STATUS_FUNCTIONS.values())
 
 # The SDK is given a little more patience than `run_job`'s watchdog, so the watchdog fires first
 # and the user gets `JobTimeout`'s guidance rather than a bare SDK timeout.
@@ -187,12 +196,13 @@ def _apply_credentials() -> None:
 
 
 async def _execute(
-    ctx: Context, tool: str, plan: Plan, relay: StepRelay | None = None
+    ctx: Context, tool: str, plan: Plan, relay: ProgressRelay | None = None
 ) -> JobResult:
     """Common path: validate → credentials → job folder → run in thread → inventory → JobResult.
 
-    `relay` is passed by the pipeline tools: the SDK fills it from the worker
-    thread with each step change and `run_job` drains it to the client.
+    `relay` is the tool's progress relay: the SDK fills it from the worker
+    thread with each warm-up phase (and, for the pipeline tools, each step
+    change) and `run_job` drains it to the client.
     """
     if _startup_error is not None:
         raise ToolError(str(_startup_error))
@@ -272,6 +282,7 @@ async def stem_split(
     ] = "primaudio",
 ) -> JobResult:
     """Split a track into separate instrument stems, optionally retimed and rekeyed."""
+    relay = ProgressRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
         src = check_file(file_path, AUDIO_EXTENSIONS, "audio file")
@@ -282,22 +293,24 @@ async def stem_split(
             target_key=target_key,
             algorithm=algorithm,
             results_folder=str(out),
+            on_progress=relay.on_progress,
         )
 
-    return await _execute(ctx, "stem_split", plan)
+    return await _execute(ctx, "stem_split", plan, relay=relay)
 
 
 @mcp.tool(title="Analyze audio", annotations=READ_ONLY_REMOTE)
 async def analyze(ctx: Context, file_path: FilePath) -> JobResult:
     """Analyze a track: BPM, key, loudness and other characteristics. Results are in `metadata`."""
+    relay = ProgressRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
         src = check_file(file_path, AUDIO_EXTENSIONS, "audio file")
         return slugify(src.stem), lambda out: audial.analyze(
-            file_path=str(src), results_folder=str(out)
+            file_path=str(src), results_folder=str(out), on_progress=relay.on_progress
         )
 
-    return await _execute(ctx, "analyze", plan)
+    return await _execute(ctx, "analyze", plan, relay=relay)
 
 
 @mcp.tool(title="Segment audio", annotations=REMOTE)
@@ -326,7 +339,7 @@ async def segment(
     Runs the `segmentation` pipeline: splits stems, then segments them; one call. Tempo and
     key are detected automatically. Each step is reported as it starts and finishes.
     """
-    relay = StepRelay()
+    relay = ProgressRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
         src = check_file(file_path, AUDIO_EXTENSIONS, "audio file")
@@ -357,6 +370,7 @@ async def master(
     ] = None,
 ) -> JobResult:
     """Master a mix, optionally matching a reference track."""
+    relay = ProgressRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
         src = check_file(file_path, AUDIO_EXTENSIONS, "audio file")
@@ -369,9 +383,10 @@ async def master(
             file_path=str(src),
             reference_file=str(ref) if ref else None,
             results_folder=str(out),
+            on_progress=relay.on_progress,
         )
 
-    return await _execute(ctx, "master", plan)
+    return await _execute(ctx, "master", plan, relay=relay)
 
 
 @mcp.tool(title="Generate a sample pack", annotations=REMOTE)
@@ -397,7 +412,7 @@ async def generate_samples(
     Runs the `sample-pack` pipeline: splits stems, then builds the sample pack; one call.
     Tempo and key are detected automatically. Each step is reported as it starts and finishes.
     """
-    relay = StepRelay()
+    relay = ProgressRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
         src = check_file(file_path, AUDIO_EXTENSIONS, "audio file")
@@ -423,6 +438,7 @@ async def generate_midi(
     ] = None,
 ) -> JobResult:
     """Transcribe an audio file to MIDI."""
+    relay = ProgressRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
         src = check_file(file_path, AUDIO_EXTENSIONS, "audio file")
@@ -431,9 +447,10 @@ async def generate_midi(
             bpm=bpm,
             results_folder=str(out),
             max_wait=_settings.job_timeout_s + SDK_WAIT_HEADROOM_S,
+            on_progress=relay.on_progress,
         )
 
-    return await _execute(ctx, "generate_midi", plan)
+    return await _execute(ctx, "generate_midi", plan, relay=relay)
 
 
 @mcp.tool(title="Generate music", annotations=REMOTE)
@@ -526,6 +543,7 @@ async def generate_music(
 
     Text to music, covers, remixes, stem extraction, completion, or analysis (understand).
     """
+    relay = ProgressRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
         src = (
@@ -559,9 +577,10 @@ async def generate_music(
             negative_prompt=negative_prompt,
             results_folder=str(out),
             max_wait=_settings.job_timeout_s + SDK_WAIT_HEADROOM_S,
+            on_progress=relay.on_progress,
         )
 
-    return await _execute(ctx, "generate_music", plan)
+    return await _execute(ctx, "generate_music", plan, relay=relay)
 
 
 @mcp.tool(title="Resynthesize a one-shot into a synth preset", annotations=REMOTE)
@@ -578,6 +597,7 @@ async def sound2vital(
     ],
 ) -> JobResult:
     """Turn a one-shot sample into an editable Audial Synth preset."""
+    relay = ProgressRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
         src = check_file(file_path, AUDIO_EXTENSIONS, "audio file")
@@ -585,9 +605,10 @@ async def sound2vital(
             file_path=str(src),
             results_folder=str(out),
             max_wait=_settings.job_timeout_s + SDK_WAIT_HEADROOM_S,
+            on_progress=relay.on_progress,
         )
 
-    return await _execute(ctx, "sound2vital", plan)
+    return await _execute(ctx, "sound2vital", plan, relay=relay)
 
 
 @mcp.tool(title="Sing lyrics in a reference voice", annotations=REMOTE)
@@ -597,7 +618,16 @@ async def text2vox(
         str,
         Field(description="Short clip of the reference voice (timbre)."),
     ],
-    lyrics: Annotated[str, Field(description="Lyrics to sing.")],
+    lyrics: Annotated[
+        str,
+        Field(
+            description=(
+                "Lyrics to sing. With lyrics_mode 'per_note' this is pipe-delimited, one "
+                "token per MIDI note, e.g. 'amazing|-|-|grace|-|how|sweet|the|sound'; "
+                "otherwise it is ordinary text."
+            )
+        ),
+    ],
     midi_file: Annotated[
         str | None,
         Field(description="MIDI melody (.mid). Give this or melody_audio_file."),
@@ -612,7 +642,22 @@ async def text2vox(
     ] = None,
     lyrics_mode: Annotated[
         str,
-        Field(description="auto (default) or an explicit lyric alignment mode."),
+        Field(
+            description=(
+                "How the lyrics line up with the melody. 'auto' (default): ordinary text, "
+                "one word per MIDI note, aligned for you (word_timestamps_file helps). "
+                "'1to1': the text is passed to the synthesizer untouched. 'per_note': "
+                "exact control -- the lyrics are pipe-delimited with one token per MIDI "
+                "note, in order. In per_note mode a token is either a syllable sung on "
+                "that note ('grace') or a HOLD, which keeps the previous syllable going "
+                "through this note: write a hold as '-' (preferred), '+', or an empty "
+                "token (a double pipe). So 'amazing|-|-|grace|-|how|sweet|the|sound' sings "
+                "'amazing' across notes 1-3 and 'grace' across notes 4-5, and needs a MIDI "
+                "file with exactly 9 notes. There is no rest token: a note that should be "
+                "silent must not be in the MIDI. The token count has to equal the note "
+                "count and the first token has to be a syllable, never a hold."
+            )
+        ),
     ] = "auto",
     reference_text: Annotated[
         str | None,
@@ -642,7 +687,12 @@ async def text2vox(
     ] = None,
     seed: Annotated[int | None, Field(description="Seed for reproducible output.")] = None,
 ) -> JobResult:
-    """Synthesize a sung vocal (and MIDI) from lyrics, a melody and a reference voice."""
+    """Synthesize a sung vocal (and MIDI) from lyrics, a melody and a reference voice.
+
+    lyrics_mode decides how the lyrics are lined up with the melody's notes; "per_note" is
+    the one that gives exact control. See the lyrics_mode and lyrics descriptions.
+    """
+    relay = ProgressRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
         ref = check_file(reference_file, AUDIO_EXTENSIONS, "reference audio file")
@@ -675,9 +725,68 @@ async def text2vox(
             seed=seed,
             results_folder=str(out),
             max_wait=_settings.job_timeout_s + SDK_WAIT_HEADROOM_S,
+            on_progress=relay.on_progress,
         )
 
-    return await _execute(ctx, "text2vox", plan)
+    return await _execute(ctx, "text2vox", plan, relay=relay)
+
+
+@mcp.tool(title="Service status", annotations=READ_ONLY_REMOTE)
+async def service_status(
+    tool: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Audial tool to report on: stem_split, analyze, segment, master, "
+                "generate_samples, generate_midi, generate_music, sound2vital or text2vox. "
+                "Omit for all of them."
+            )
+        ),
+    ] = None,
+) -> dict[str, Any]:
+    """Which Audial tools have a worker awake right now, and what a cold one will cost.
+
+    Audial's GPU workers scale to zero. A tool reported `warm: false` will spend
+    `expectedColdStartMs` starting a worker before it does any work -- a few minutes, once --
+    on top of the job's own `expectedRunMs`. Worth checking before starting a long job, and
+    worth telling the user about with the `notice` text when something is cold: otherwise the
+    wait looks like a hang. Nothing here starts a job or costs anything.
+    """
+    if _startup_error is not None:
+        raise ToolError(str(_startup_error))
+    try:
+        if tool is not None and tool not in STATUS_FUNCTIONS and tool not in _API_FUNCTIONS:
+            known = ", ".join(sorted(STATUS_FUNCTIONS))
+            raise ValidationError(
+                f"{tool!r} is not an Audial tool. Give one of: {known}, or omit it for all."
+            )
+        _apply_credentials()
+        doc = await anyio.to_thread.run_sync(lambda: audial.status(tool))
+        if not isinstance(doc, dict):
+            return {"result": _redact(doc)}
+
+        result: dict[str, Any] = _redact(doc)
+        cold = [
+            item.get("function")
+            for item in (doc.get("items") or [])
+            if isinstance(item, dict) and item.get("warm") is False
+        ]
+        if cold:
+            # The same sentence the SDK's CLI, the website and both plugins show, so the
+            # user hears one explanation for the wait wherever they are.
+            coldest = max(
+                (
+                    item.get("expectedColdStartMs") or 0
+                    for item in doc.get("items") or []
+                    if isinstance(item, dict) and item.get("warm") is False
+                ),
+                default=0,
+            )
+            result["cold"] = cold
+            result["notice"] = audial.warmup.cold_start_message(coldest)
+        return result
+    except Exception as exc:  # noqa: BLE001 — every failure becomes a ToolError
+        raise _tool_error(exc, tool="service_status") from None
 
 
 # Pipeline ids are Firebase push keys; the id is interpolated into the request path, so it is
