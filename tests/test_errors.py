@@ -1,4 +1,9 @@
-from audial.api.exceptions import AudialAPIError, AudialAuthError, SubscriptionRequiredError
+from audial.api.exceptions import (
+    AudialAPIError,
+    AudialAuthError,
+    AudialValidationError,
+    SubscriptionRequiredError,
+)
 from mcp.server.mcpserver.exceptions import ToolError
 
 from audial_mcp.config import ConfigError
@@ -34,3 +39,28 @@ def test_generic_api_error_verbatim_and_unknown_is_generic():
     assert "quota" in str(to_tool_error(AudialAPIError("quota exceeded"), tool="x"))
     msg = str(to_tool_error(RuntimeError("secret internals sk-123"), tool="x"))
     assert "sk-123" not in msg and "x failed unexpectedly" in msg
+
+
+def test_a_validation_error_keeps_its_position():
+    """Per-note lyrics name the note that is wrong; the model needs that number."""
+    err = to_tool_error(
+        AudialValidationError("note 1 has no syllable; the first note needs one", position=1),
+        tool="text2vox",
+    )
+    assert str(err) == "note 1 has no syllable; the first note needs one (position 1)"
+
+
+def test_a_validation_error_without_a_position_reads_as_itself():
+    err = to_tool_error(AudialValidationError("the lyrics are empty"), tool="text2vox")
+    assert str(err) == "the lyrics are empty"
+
+
+def test_the_apis_lyrics_invalid_message_survives():
+    """The count rule is the API's (it needs the MIDI); the SDK re-raises it the same way."""
+    err = to_tool_error(
+        AudialValidationError(
+            "9 tokens for 10 notes; the first unmatched note starts at 2.4 s", position=10
+        ),
+        tool="text2vox",
+    )
+    assert "9 tokens for 10 notes" in str(err) and "position 10" in str(err)
