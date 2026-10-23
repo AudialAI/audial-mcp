@@ -65,6 +65,7 @@ page. A key set this way takes priority over a saved sign-in.
 | `sound2vital` | One-shot → editable Audial Synth (Vital) preset |
 | `text2vox` | Lyrics + reference voice → sung vocal and MIDI |
 | `pipeline_status` | Look up a pipeline by id: its state, each step, and the outputs so far |
+| `service_status` | Which tools have a worker awake right now, and what a cold start will cost |
 | `list_results` | Browse previous results in your results folder |
 
 `segment` and `generate_samples` run as Audial *pipelines*: both need separated stems, so the
@@ -72,6 +73,46 @@ API splits stems and then runs the step you asked for as one job. Each step is r
 starts and finishes ("stem-split completed in 41 s; sample-pack running"), and the pipeline id
 comes back as the result's `execution_id` -- pass it to `pipeline_status` to check on a job
 whose call timed out.
+
+## Per-note lyrics
+
+`text2vox` lines lyrics up with a melody. `lyrics_mode="per_note"` is the mode that gives
+exact control: the lyrics are pipe-delimited, one token per MIDI note, and a **hold** keeps
+the previous syllable going through the next note.
+
+| Token | Meaning |
+|---|---|
+| `grace` | Sung on this note |
+| `-` | Hold: continue the previous syllable through this note (the documented form) |
+| `+` | Hold as well |
+| *empty* | Hold as well -- what a double pipe produces |
+
+```
+amazing|-|-|grace|-|how|sweet|the|sound
+```
+
+That sings "amazing" across notes 1-3 and "grace" across notes 4-5, and needs a MIDI file
+with exactly nine notes. There is no rest token: a note that should be silent should not be
+in the MIDI. The token count must equal the note count, and the first token must be a
+syllable -- a lyric string that breaks either rule comes back as a tool error naming the
+note it is about ("note 1 has no syllable; the first note needs one (position 1)"), before
+anything is uploaded.
+
+## Cold starts
+
+Audial's GPU workers scale to zero, so the first job after an idle period spends a few extra
+minutes starting one and loading the model; every job after it is fast. Audial reports that
+phase on the job it is already polling, and every tool here relays it as a progress
+notification and a log line:
+
+```
+Warming up the machine — the first request takes a few minutes longer than usual
+(about 3 min); every run after this is faster
+Working on your job…
+```
+
+It is the same sentence the Audial website, CLI and plugins show. `service_status` answers
+the same question before you start anything, so a long wait can be explained in advance.
 
 ## What leaves your machine
 

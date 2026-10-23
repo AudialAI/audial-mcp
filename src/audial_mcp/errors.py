@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import logging
 
-from audial.api.exceptions import AudialAuthError, AudialError, SubscriptionRequiredError
+from audial.api.exceptions import (
+    AudialAuthError,
+    AudialError,
+    AudialValidationError,
+    SubscriptionRequiredError,
+)
 from mcp.server.mcpserver.exceptions import ToolError
 
 from audial_mcp.config import ConfigError
@@ -33,6 +38,15 @@ def to_tool_error(
     execution_id: str | None = None,
     api_key_from_env: bool = False,
 ) -> ToolError:
+    if isinstance(exc, AudialValidationError):
+        # Input Audial will not accept, with the place it went wrong: per-note
+        # lyrics carry the 1-based note the message is about, and the model
+        # needs that number to fix the string it wrote (or to tell the user
+        # which note to edit). Checked before SubscriptionRequiredError and
+        # AudialError below, both of which would swallow the position.
+        position = getattr(exc, "position", None)
+        where = f" (position {position})" if isinstance(position, int) else ""
+        return ToolError(f"{exc}{where}")
     if isinstance(exc, (ConfigError, ValidationError, SubscriptionRequiredError)):
         return ToolError(str(exc))
     if isinstance(exc, SignInRequired):
