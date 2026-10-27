@@ -2,17 +2,17 @@
 
 [![AllMCPs Verified](https://allmcps.com/api/badge/audial)](https://allmcps.com/mcp/audial?verify=655ada1a-49b7-4930-9ec2-2e5ed7eaa6c6)
 
-Powered by [Audial](https://audialmusic.ai) — run Audial's hosted audio tools from any MCP
+Powered by [Audial](https://audialmusic.ai?utm_source=github&utm_medium=readme&utm_campaign=mcp) — run Audial's hosted audio tools from any MCP
 client: split stems, analyze and segment audio, master tracks, build sample packs, convert
 audio to MIDI, generate music, turn a one-shot into an editable Audial Synth preset, and sing
-lyrics in a reference voice. See the [API reference](https://audialmusic.ai/resources/api-reference)
+lyrics in a reference voice. See the [API reference](https://audialmusic.ai/resources/api-reference?utm_source=github&utm_medium=readme&utm_campaign=mcp)
 for details on what each tool calls.
 
 mcp-name: io.github.AudialAI/audial-mcp
 
 ## Install
 
-You need an Audial account (https://audialmusic.ai) and
+You need an Audial account (https://audialmusic.ai?utm_source=github&utm_medium=readme&utm_campaign=mcp) and
 [`uv`](https://docs.astral.sh/uv/getting-started/installation/). There is no API key to copy:
 the first time a tool runs, a sign-in page opens in your browser. Approve it and the tool
 carries on.
