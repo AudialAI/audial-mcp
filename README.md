@@ -61,7 +61,7 @@ page. A key set this way takes priority over a saved sign-in.
 | `master` | Mastering, optionally matched to a reference |
 | `generate_samples` | Sample pack from a track -- splits stems, then builds the pack; one call |
 | `generate_midi` | Audio to MIDI |
-| `generate_music` | Text to music, covers, remixes, extraction, completion with the Audial music model |
+| `generate_music` | Text to music, covers, remixes, lego and understand with the Audial music model |
 | `sound2vital` | One-shot → editable Audial Synth (Vital) preset |
 | `text2vox` | Lyrics + reference voice → sung vocal and MIDI |
 | `pipeline_status` | Look up a pipeline by id: its state, each step, and the outputs so far |

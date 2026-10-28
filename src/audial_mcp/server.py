@@ -562,7 +562,7 @@ async def generate_music(
         str,
         Field(
             description=(
-                "text2music (default), cover, remix, extract, lego, complete, or understand."
+                "text2music (default), cover, remix, lego, or understand."
             )
         ),
     ] = "text2music",
@@ -579,7 +579,7 @@ async def generate_music(
         str | None,
         Field(
             description=(
-                "Local audio file; required for remix, extract, lego, complete, understand."
+                "Local audio file; required for remix, lego, understand."
             )
         ),
     ] = None,
@@ -620,7 +620,7 @@ async def generate_music(
         str | None,
         Field(
             description=(
-                "Track to extract/replace for extract/lego: vocals, drums, bass, guitar, piano, "
+                "Track to emphasise for lego: vocals, drums, bass, guitar, piano, "
                 "strings, synth, other."
             )
         ),
@@ -633,7 +633,7 @@ async def generate_music(
 ) -> JobResult:
     """Generate music with the Audial music model.
 
-    Text to music, covers, remixes, stem extraction, completion, or analysis (understand).
+    Text to music, covers, remixes, lego (re-render with one track emphasised), or analysis (understand).
     """
     relay = ProgressRelay()
 
