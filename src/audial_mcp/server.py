@@ -560,11 +560,7 @@ async def generate_music(
     ],
     task_type: Annotated[
         str,
-        Field(
-            description=(
-                "text2music (default), cover, remix, lego, or understand."
-            )
-        ),
+        Field(description=("text2music (default), cover, remix, lego, or understand.")),
     ] = "text2music",
     lyrics: Annotated[
         str | None,
@@ -577,11 +573,7 @@ async def generate_music(
     ] = None,
     source_file: Annotated[
         str | None,
-        Field(
-            description=(
-                "Local audio file; required for remix, lego, understand."
-            )
-        ),
+        Field(description=("Local audio file; required for remix, lego, understand.")),
     ] = None,
     reference_file: Annotated[
         str | None,
@@ -633,7 +625,8 @@ async def generate_music(
 ) -> JobResult:
     """Generate music with the Audial music model.
 
-    Text to music, covers, remixes, lego (re-render with one track emphasised), or analysis (understand).
+    Text to music, covers, remixes, lego (re-render with one track emphasised),
+    or analysis (understand).
     """
     relay = ProgressRelay()
 
