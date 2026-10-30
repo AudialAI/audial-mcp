@@ -20,6 +20,14 @@ def test_subscription_error_keeps_api_text():
     assert isinstance(err, ToolError) and "subscription" in str(err)
 
 
+def test_subscription_error_keeps_api_text_for_sound2serum():
+    err = to_tool_error(
+        SubscriptionRequiredError("This feature needs an active Audial subscription."),
+        tool="sound2serum",
+    )
+    assert isinstance(err, ToolError) and "subscription" in str(err)
+
+
 def test_auth_error_with_a_configured_key_points_at_the_variables():
     err = to_tool_error(AudialAuthError("401"), tool="analyze", api_key_from_env=True)
     assert "AUDIAL_USER_ID" in str(err) and "AUDIAL_API_KEY" in str(err)

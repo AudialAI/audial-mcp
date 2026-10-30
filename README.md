@@ -4,8 +4,8 @@
 
 Powered by [Audial](https://audialmusic.ai?utm_source=github&utm_medium=readme&utm_campaign=mcp) — run Audial's hosted audio tools from any MCP
 client: split stems, analyze and segment audio, master tracks, build sample packs, convert
-audio to MIDI, generate music, turn a one-shot into an editable Audial Synth preset, and sing
-lyrics in a reference voice. See the [API reference](https://audialmusic.ai/resources/api-reference?utm_source=github&utm_medium=readme&utm_campaign=mcp)
+audio to MIDI, generate music, turn a one-shot into an editable Audial Synth or Serum 2
+preset, and sing lyrics in a reference voice. See the [API reference](https://audialmusic.ai/resources/api-reference?utm_source=github&utm_medium=readme&utm_campaign=mcp)
 for details on what each tool calls.
 
 mcp-name: io.github.AudialAI/audial-mcp
@@ -63,6 +63,7 @@ page. A key set this way takes priority over a saved sign-in.
 | `generate_midi` | Audio to MIDI |
 | `generate_music` | Text to music, covers, remixes, lego and understand with the Audial music model |
 | `sound2vital` | One-shot → editable Audial Synth (Vital) preset |
+| `sound2serum` | One-shot → editable Xfer Serum 2 (.SerumPreset) preset |
 | `text2vox` | Lyrics + reference voice → sung vocal and MIDI |
 | `pipeline_status` | Look up a pipeline by id: its state, each step, and the outputs so far |
 | `service_status` | Which tools have a worker awake right now, and what a cold start will cost |

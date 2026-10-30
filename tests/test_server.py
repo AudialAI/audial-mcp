@@ -24,6 +24,7 @@ TOOLS = {
     "generate_midi",
     "generate_music",
     "sound2vital",
+    "sound2serum",
     "text2vox",
     "pipeline_status",
     "service_status",
@@ -464,6 +465,7 @@ SDK_TOOL_ARGS = {
     "generate_midi": {"file_path": "{wav}", "bpm": 120},
     "generate_music": {"prompt": "upbeat country shuffle", "audio_duration": 30, "seed": 7},
     "sound2vital": {"file_path": "{wav}"},
+    "sound2serum": {"file_path": "{wav}"},
     "text2vox": {"reference_file": "{wav}", "lyrics": "la la", "midi_file": "{mid}", "seed": 3},
 }
 
