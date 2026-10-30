@@ -289,6 +289,69 @@ async def test_summary_text_mentions_folder(client, wav, monkeypatch):
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("tool", ["sound2vital", "sound2serum"])
+async def test_a_weak_preset_says_why(client, wav, monkeypatch, tool):
+    fake_sdk(
+        monkeypatch,
+        tool,
+        produce=("preset.bin",),
+        returns={
+            "scores": {"huang_similarity": 0.8512, "at_threshold": False, "threshold": 0.98},
+            "warnings": ["This clip sounds like several notes in a row."],
+        },
+    )
+    result = await client.call_tool(tool, {"file_path": str(wav)})
+    summary = result.structured_content["summary"]
+    assert "several notes in a row" in summary
+    assert "scored 0.851 against a 0.980 match target" in summary
+    assert "  " not in summary
+    # The warning already said what to do; the advice is not repeated.
+    assert "usual cause" not in summary
+
+
+@pytest.mark.anyio
+async def test_a_weak_preset_with_no_warning_still_gets_the_advice(client, wav, monkeypatch):
+    fake_sdk(
+        monkeypatch,
+        "sound2serum",
+        produce=("preset.bin",),
+        returns={"scores": {"huang_similarity": 0.9787, "at_threshold": False, "threshold": 0.98}},
+    )
+    result = await client.call_tool("sound2serum", {"file_path": str(wav)})
+    summary = result.structured_content["summary"]
+    assert "scored 0.979 against a 0.980 match target" in summary
+    assert "trim the input to a single note" in summary
+
+
+@pytest.mark.anyio
+async def test_a_good_preset_stays_quiet(client, wav, monkeypatch):
+    fake_sdk(
+        monkeypatch,
+        "sound2vital",
+        produce=("preset.vital",),
+        returns={"scores": {"huang_similarity": 0.99, "at_threshold": True, "threshold": 0.98}},
+    )
+    result = await client.call_tool("sound2vital", {"file_path": str(wav)})
+    assert "match target" not in result.structured_content["summary"]
+
+
+@pytest.mark.anyio
+async def test_other_tools_get_no_resynthesis_advice(client, wav, monkeypatch):
+    fake_sdk(monkeypatch, "master", produce=("m.wav",), returns={"scores": {"at_threshold": False}})
+    result = await client.call_tool("master", {"file_path": str(wav)})
+    assert "match target" not in result.structured_content["summary"]
+
+
+@pytest.mark.anyio
+async def test_resynthesis_tools_rule_out_loops_for_the_model(client):
+    tools = {t.name: t for t in (await client.list_tools()).tools}
+    for name in ("sound2vital", "sound2serum"):
+        description = tools[name].input_schema["properties"]["file_path"]["description"]
+        assert "Not a loop" in description and "trim it to one note" in description
+        assert "Not for loops" in tools[name].description
+
+
+@pytest.mark.anyio
 async def test_every_tool_documents_its_parameters(client):
     for tool in (await client.list_tools()).tools:
         assert tool.description, f"{tool.name} has no description"

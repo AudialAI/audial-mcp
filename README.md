@@ -62,8 +62,8 @@ page. A key set this way takes priority over a saved sign-in.
 | `generate_samples` | Sample pack from a track -- splits stems, then builds the pack; one call |
 | `generate_midi` | Audio to MIDI |
 | `generate_music` | Text to music, covers, remixes, lego and understand with the Audial music model |
-| `sound2vital` | One-shot → editable Audial Synth (Vital) preset |
-| `sound2serum` | One-shot → editable Xfer Serum 2 (.SerumPreset) preset |
+| `sound2vital` | One isolated sound → editable Audial Synth (Vital) preset. Not for loops or melodies |
+| `sound2serum` | One isolated sound → editable Xfer Serum 2 (.SerumPreset) preset. Not for loops or melodies |
 | `text2vox` | Lyrics + reference voice → sung vocal and MIDI |
 | `pipeline_status` | Look up a pipeline by id: its state, each step, and the outputs so far |
 | `service_status` | Which tools have a worker awake right now, and what a cold start will cost |

@@ -61,8 +61,19 @@ INSTRUCTIONS = (
     "one is returned. No API key is needed: if the user is not signed in, the first tool call "
     "opens a sign-in page in their browser and continues once they approve. If a tool instead "
     "returns a sign-in link, give the user that link and the code, and retry when they say "
-    "they have approved it."
+    "they have approved it. "
+    "sound2vital and sound2serum model one isolated sound, so check the input first: a file "
+    "that is a loop, melody or drum pattern (a tempo or 'loop' in its name is a clue) gives a "
+    "poor preset even under 20 s, so say so before running it and suggest trimming it to one "
+    "note. After either tool, relay anything in `summary` about the match to the user."
 )
+
+RESYNTH_INPUT = (
+    "One isolated sound: a single note, chord stab or hit, ideally 1-4 s and dry, 20 s at most. "
+    "Not a loop, melody, drum pattern or anything with several notes in sequence: those produce "
+    "a poor preset even under 20 s. To use a loop, trim it to one note first."
+)
+RESYNTH_TOOLS = frozenset({"sound2vital", "sound2serum"})
 
 mcp = MCPServer("audial", instructions=INSTRUCTIONS, version=__version__)
 
@@ -185,6 +196,28 @@ def _metadata(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {"result": _redact(raw)}
     return _redact({k: v for k, v in raw.items() if k != "files"})
+
+
+def _resynth_advice(tool: str, raw: Any) -> str:
+    """What a finished resynthesis needs the model to pass on, so a weak preset has a reason."""
+    if tool not in RESYNTH_TOOLS or not isinstance(raw, dict):
+        return ""
+    notes = [w for w in raw.get("warnings") or [] if isinstance(w, str)]
+    scores = raw.get("scores")
+    if isinstance(scores, dict) and scores.get("at_threshold") is False:
+        score, target = scores.get("huang_similarity"), scores.get("threshold")
+        if isinstance(score, (int, float)) and isinstance(target, (int, float)):
+            notes.append(f"The preset scored {score:.3f} against a {target:.3f} match target.")
+        else:
+            notes.append("The preset is below the match target.")
+        # The API's own warning already gives this advice when it spotted several notes.
+        if not notes[:-1]:
+            notes.append(
+                "The usual cause is an input that is not one isolated sound: a loop, melody or "
+                "drum pattern gives a poor preset even under 20 s. If this sounds wrong, trim "
+                "the input to a single note and run it again."
+            )
+    return "".join(f" {note}" for note in notes)
 
 
 def _tool_filter(tool: str) -> str:
@@ -319,6 +352,7 @@ async def _execute(
         elapsed = int(time.monotonic() - started)
         summary = f"{tool} finished in {elapsed} s: {len(files)} file(s) in {output_dir}"
         log.info("%s", summary)
+        advice = _resynth_advice(tool, raw)
         # The job is done; a failed progress notification must not turn it into an error.
         with contextlib.suppress(Exception):
             await ctx.report_progress(elapsed, total=elapsed, message=summary)
@@ -328,7 +362,7 @@ async def _execute(
             output_dir=str(output_dir),
             files=files,
             metadata=_metadata(raw),
-            summary=summary,
+            summary=summary + advice,
         )
     except Exception as exc:  # noqa: BLE001 — every failure becomes a ToolError
         if output_dir is not None:
@@ -675,13 +709,17 @@ async def sound2vital(
         str,
         Field(
             description=(
-                "A short one-shot (<= 20 s) audio file. The result is an editable Audial Synth "
-                "(.vital) preset that reproduces its timbre."
+                f"{RESYNTH_INPUT} The result is an editable Audial Synth (.vital) preset that "
+                "reproduces its timbre."
             )
         ),
     ],
 ) -> JobResult:
-    """Turn a one-shot sample into an editable Audial Synth preset."""
+    """Turn one isolated sound into an editable Audial Synth preset.
+
+    Not for loops or melodies, which give a poor preset. If the result's summary says the match
+    is weak, tell the user and suggest trimming the input to one note.
+    """
     relay = ProgressRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
@@ -703,14 +741,17 @@ async def sound2serum(
         str,
         Field(
             description=(
-                "A short one-shot (<= 20 s) audio file. The result is an editable Xfer Serum "
-                "2 (.SerumPreset) preset that reproduces its timbre. No plugin needed -- open "
-                "it in Serum 2.1+."
+                f"{RESYNTH_INPUT} The result is an editable Xfer Serum 2 (.SerumPreset) preset "
+                "that reproduces its timbre. No plugin needed -- open it in Serum 2.1+."
             )
         ),
     ],
 ) -> JobResult:
-    """Turn a one-shot sample into an editable Xfer Serum 2 preset."""
+    """Turn one isolated sound into an editable Xfer Serum 2 preset.
+
+    Not for loops or melodies, which give a poor preset. If the result's summary says the match
+    is weak, tell the user and suggest trimming the input to one note.
+    """
     relay = ProgressRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
