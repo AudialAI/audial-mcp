@@ -1,6 +1,7 @@
 import inspect
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -12,6 +13,7 @@ from audial.api.exceptions import AudialError, AudialValidationError
 from audial.utils import config as sdk_config
 from mcp import Client
 
+import audial_mcp
 import audial_mcp.server as server_mod
 from audial_mcp.config import ConfigError, Settings
 
@@ -349,6 +351,28 @@ async def test_resynthesis_tools_rule_out_loops_for_the_model(client):
         description = tools[name].input_schema["properties"]["file_path"]["description"]
         assert "Not a loop" in description and "trim it to one note" in description
         assert "Not for loops" in tools[name].description
+
+
+def test_every_release_file_names_the_same_version():
+    root = Path(__file__).resolve().parent.parent
+    version = re.search(r'^version = "(.+)"', (root / "pyproject.toml").read_text(), re.M)[1]
+    bundle = (root / "bundle" / "pyproject.toml").read_text()
+    server_json = json.loads((root / "server.json").read_text())
+    assert audial_mcp.__version__ == version
+    assert server_json["version"] == version
+    assert server_json["packages"][0]["version"] == version
+    assert json.loads((root / "bundle" / "manifest.json").read_text())["version"] == version
+    assert f'version = "{version}"' in bundle
+    assert f'dependencies = ["audial-mcp=={version}"]' in bundle
+
+
+@pytest.mark.anyio
+async def test_the_bundle_lists_every_tool(client):
+    root = Path(__file__).resolve().parent.parent
+    manifest = json.loads((root / "bundle" / "manifest.json").read_text())
+    assert {t["name"] for t in manifest["tools"]} == {
+        t.name for t in (await client.list_tools()).tools
+    }
 
 
 @pytest.mark.anyio
