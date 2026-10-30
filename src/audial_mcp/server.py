@@ -207,15 +207,17 @@ def _resynth_advice(tool: str, raw: Any) -> str:
     if isinstance(scores, dict) and scores.get("at_threshold") is False:
         score, target = scores.get("huang_similarity"), scores.get("threshold")
         if isinstance(score, (int, float)) and isinstance(target, (int, float)):
-            match = f"The preset scored {score:.2f} against a {target:.2f} match target. "
+            notes.append(f"The preset scored {score:.3f} against a {target:.3f} match target.")
         else:
-            match = "The preset is below the match target. "
-        notes.append(
-            f"{match}The usual cause is an input that is not one isolated sound: a loop, melody "
-            "or drum pattern gives a poor preset even under 20 s. If this sounds wrong, trim the "
-            "input to a single note and run it again."
-        )
-    return " ".join(f" {note}" for note in notes)
+            notes.append("The preset is below the match target.")
+        # The API's own warning already gives this advice when it spotted several notes.
+        if not notes[:-1]:
+            notes.append(
+                "The usual cause is an input that is not one isolated sound: a loop, melody or "
+                "drum pattern gives a poor preset even under 20 s. If this sounds wrong, trim "
+                "the input to a single note and run it again."
+            )
+    return "".join(f" {note}" for note in notes)
 
 
 def _tool_filter(tool: str) -> str:

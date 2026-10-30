@@ -303,7 +303,23 @@ async def test_a_weak_preset_says_why(client, wav, monkeypatch, tool):
     result = await client.call_tool(tool, {"file_path": str(wav)})
     summary = result.structured_content["summary"]
     assert "several notes in a row" in summary
-    assert "scored 0.85 against a 0.98 match target" in summary
+    assert "scored 0.851 against a 0.980 match target" in summary
+    assert "  " not in summary
+    # The warning already said what to do; the advice is not repeated.
+    assert "usual cause" not in summary
+
+
+@pytest.mark.anyio
+async def test_a_weak_preset_with_no_warning_still_gets_the_advice(client, wav, monkeypatch):
+    fake_sdk(
+        monkeypatch,
+        "sound2serum",
+        produce=("preset.bin",),
+        returns={"scores": {"huang_similarity": 0.9787, "at_threshold": False, "threshold": 0.98}},
+    )
+    result = await client.call_tool("sound2serum", {"file_path": str(wav)})
+    summary = result.structured_content["summary"]
+    assert "scored 0.979 against a 0.980 match target" in summary
     assert "trim the input to a single note" in summary
 
 
