@@ -54,6 +54,12 @@ deleted after the run, see "Cleanup" at the bottom).
   `-P2hpdM-CErNCfFTpzEb_sound2vital/preset.vital` (57,134 bytes) plus `render.wav`,
   `report.json`, `scores.json`, and two `keyboard_*.wav` previews.
 
+- [ ] **5b. `sound2serum`** on `oneshot.wav` — **not yet run.** Added with the sound2serum
+  tool (audial-mcp 0.4.0 / audial-sdk 1.5.0); run this once the worker templates are switched
+  to API mode (plan `PLAN-v8-sound2serum.md`, workstream A/B) and a real execution can
+  complete. Expect a `.SerumPreset` file in the job folder alongside `render.wav`,
+  `report.json`, `scores.json` and the two `keyboard_*.wav` previews, mirroring check 5.
+
 - [ ] **6. `text2vox`** with `reference_file=voice.wav`,
   `lyrics="down by the river where the water runs slow"`, `midi_file=melody.mid` — **FAILED
   twice (remote, dev GPU resource exhaustion).** Attempt 1: execution `-P2hpdaNWIoqDHlG3wE4`,
@@ -139,6 +145,7 @@ deleted after the run, see "Cleanup" at the bottom).
 | 3 | `stem_split` | **FAIL (remote)** | same root cause as #2 |
 | 4 | `generate_music` | PASS | 118.8 s, exe `-P2hpd-1LtuDAxM7zc9g`, `lm_model` ok, redacted |
 | 5 | `sound2vital` | PASS | 104.8 s, exe `-P2hpdM-CErNCfFTpzEb`, `.vital` present |
+| 5b | `sound2serum` | **not yet run** | needs worker templates switched to API mode first |
 | 6 | `text2vox` | **FAIL (remote)** | CUDA OOM x2, exe `-P2hpdaNWIoqDHlG3wE4` / `-P2hprIE4e1WGLsIRJZ4` |
 | 7 | `list_results` | PASS | newest-first, filter, `..` refused |
 | 8 | error paths | PASS | missing file / missing creds / prod 402 all readable |

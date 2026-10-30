@@ -50,7 +50,7 @@ INSTRUCTIONS = (
     "Audial runs hosted audio tools. Give tools full local file paths. Results are written to "
     "the user's Audial results folder and returned as file paths; tell the user where they are. "
     "Jobs take from a few seconds (analyze) to a few minutes (stem_split, generate_music, "
-    "sound2vital, text2vox); progress notifications report elapsed time. segment and "
+    "sound2vital, sound2serum, text2vox); progress notifications report elapsed time. segment and "
     "generate_samples run as pipelines -- they split stems first and then do the step asked "
     "for, in one call -- and report each step as it starts and finishes; pipeline_status looks "
     "one up again by id. Audial's GPU workers scale to zero, so the first job after an idle "
@@ -696,6 +696,35 @@ async def sound2vital(
     return await _execute(ctx, "sound2vital", plan, relay=relay)
 
 
+@mcp.tool(title="Resynthesize a one-shot into a Serum 2 preset", annotations=REMOTE)
+async def sound2serum(
+    ctx: Context,
+    file_path: Annotated[
+        str,
+        Field(
+            description=(
+                "A short one-shot (<= 20 s) audio file. The result is an editable Xfer Serum "
+                "2 (.SerumPreset) preset that reproduces its timbre. No plugin needed -- open "
+                "it in Serum 2.1+."
+            )
+        ),
+    ],
+) -> JobResult:
+    """Turn a one-shot sample into an editable Xfer Serum 2 preset."""
+    relay = ProgressRelay()
+
+    def plan() -> tuple[str, Callable[[Path], Any]]:
+        src = check_file(file_path, AUDIO_EXTENSIONS, "audio file")
+        return slugify(src.stem), lambda out: audial.sound2serum(
+            file_path=str(src),
+            results_folder=str(out),
+            max_wait=_settings.job_timeout_s + SDK_WAIT_HEADROOM_S,
+            on_progress=relay.on_progress,
+        )
+
+    return await _execute(ctx, "sound2serum", plan, relay=relay)
+
+
 @mcp.tool(title="Sing lyrics in a reference voice", annotations=REMOTE)
 async def text2vox(
     ctx: Context,
@@ -824,8 +853,8 @@ async def service_status(
         Field(
             description=(
                 "Audial tool to report on: stem_split, analyze, segment, master, "
-                "generate_samples, generate_midi, generate_music, sound2vital or text2vox. "
-                "Omit for all of them."
+                "generate_samples, generate_midi, generate_music, sound2vital, sound2serum "
+                "or text2vox. Omit for all of them."
             )
         ),
     ] = None,

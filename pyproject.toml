@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "audial-mcp"
-version = "0.3.1"
-description = "MCP server for Audial: stem splitting, mastering, MIDI, music generation, resynthesis and vocal synthesis from any MCP client."
+version = "0.4.0"
+description = "MCP server for Audial: stem splitting, mastering, MIDI, music generation, resynthesis to Vital or Serum 2, and vocal synthesis from any MCP client."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -18,7 +18,7 @@ classifiers = [
 ]
 dependencies = [
   "mcp>=2.2,<3",
-  "audial-sdk>=1.4.3",
+  "audial-sdk>=1.5.0",
   "anyio>=4",
   "pydantic>=2",
   "typing_extensions>=4",

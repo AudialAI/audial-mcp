@@ -382,6 +382,7 @@ SDK_POLLING_TOOLS = {
     "generate_midi": {"file_path": "{wav}"},
     "generate_music": {"prompt": "a waltz"},
     "sound2vital": {"file_path": "{wav}"},
+    "sound2serum": {"file_path": "{wav}"},
     "text2vox": {"reference_file": "{wav}", "lyrics": "la la", "midi_file": "{mid}"},
 }
 
