@@ -22,3 +22,39 @@ jobs:
           fi
       - run: uv build
       - run: uv publish --token "${{ secrets.PYPI_TOKEN }}"
+  # PyPI first: both of these point at the package just published.
+  registry:
+    needs: pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # the registry's GitHub OIDC login; no stored token
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_linux_amd64.tar.gz \
+            | tar xz mcp-publisher
+      - run: ./mcp-publisher login github-oidc
+      # PyPI can take a moment to serve a new version, and the registry checks it.
+      - name: Publish to the MCP registry
+        run: |
+          for attempt in 1 2 3 4 5; do
+            ./mcp-publisher publish && exit 0
+            sleep 30
+          done
+          exit 1
+  bundle:
+    needs: pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # attach the bundle to the GitHub release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - run: ./scripts/build_mcpb.sh
+      - name: Attach to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.mcpb --title "$GITHUB_REF_NAME" --generate-notes

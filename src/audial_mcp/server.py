@@ -56,9 +56,10 @@ INSTRUCTIONS = (
     "one up again by id. Audial's GPU workers scale to zero, so the first job after an idle "
     "period spends a few extra minutes starting one: that shows up as a 'Warming up the "
     "machine' progress line, which is worth relaying to the user as the reason for the wait, "
-    "and service_status says in advance which tools are warm. Some tools need an "
-    "active Audial subscription for every tool except list_results; relay the error text if "
-    "one is returned. No API key is needed: if the user is not signed in, the first tool call "
+    "and service_status says in advance which tools are warm. Every job counts as one run "
+    "except analyze; a failed run does not count. Accounts without a subscription get a small "
+    "free allowance and then need a subscription: relay the error text if one is returned. "
+    "No API key is needed: if the user is not signed in, the first tool call "
     "opens a sign-in page in their browser and continues once they approve. If a tool instead "
     "returns a sign-in link, give the user that link and the code, and retry when they say "
     "they have approved it. "
@@ -407,7 +408,12 @@ async def stem_split(
         Field(description="Separation algorithm. Default 'primaudio'."),
     ] = "primaudio",
 ) -> JobResult:
-    """Split a track into separate instrument stems, optionally retimed and rekeyed."""
+    """Split a track into separate instrument stems, optionally retimed and rekeyed.
+
+    Use for a full song or mix when the user wants vocals, drums, bass or an instrumental on
+    their own. For tempo and key alone use analyze; for sections use segment. Takes a few
+    minutes and counts as one run. Stems go to a new results folder; the source is unchanged.
+    """
     relay = ProgressRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
@@ -427,7 +433,12 @@ async def stem_split(
 
 @mcp.tool(title="Analyze audio", annotations=READ_ONLY_REMOTE)
 async def analyze(ctx: Context, file_path: FilePath) -> JobResult:
-    """Analyze a track: BPM, key, loudness and other characteristics. Results are in `metadata`."""
+    """Analyze a track: BPM, key, loudness and other characteristics.
+
+    Use this first whenever the user asks for tempo, key or loudness. It is the fastest tool
+    (seconds), does not count as a run, and changes nothing. The answer is in `metadata` and
+    the same data is saved to the results folder.
+    """
     relay = ProgressRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
@@ -462,8 +473,10 @@ async def segment(
 ) -> JobResult:
     """Detect song sections (intro, verse, chorus...) and analyze components within them.
 
-    Runs the `segmentation` pipeline: splits stems, then segments them; one call. Tempo and
-    key are detected automatically. Each step is reported as it starts and finishes.
+    Use for song structure. For tempo and key alone use analyze. Runs the `segmentation`
+    pipeline: splits stems, then segments them; one call, counted as one run. Tempo and key
+    are detected automatically. Takes a few minutes and each step is reported as it starts and
+    finishes. If the call times out the job keeps running: pipeline_status finds it.
     """
     relay = ProgressRelay()
 
@@ -495,7 +508,12 @@ async def master(
         ),
     ] = None,
 ) -> JobResult:
-    """Master a mix, optionally matching a reference track."""
+    """Master a mix, optionally matching a reference track.
+
+    Use for a finished stereo mix, not for separate stems. Pass a reference track when the user
+    names one. Takes a few minutes and counts as one run. The master goes to a new results
+    folder; the source is unchanged.
+    """
     relay = ProgressRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
@@ -535,8 +553,11 @@ async def generate_samples(
 ) -> JobResult:
     """Extract a sample pack (one-shots and loops) from a track.
 
-    Runs the `sample-pack` pipeline: splits stems, then builds the sample pack; one call.
-    Tempo and key are detected automatically. Each step is reported as it starts and finishes.
+    Use when the user wants drum hits or loops taken from a finished track. Runs the
+    `sample-pack` pipeline: splits stems, then builds the sample pack; one call, counted as one
+    run. Tempo and key are detected automatically. Takes a few minutes and each step is reported
+    as it starts and finishes. If the call times out the job keeps running: pipeline_status
+    finds it. Samples go to a new results folder.
     """
     relay = ProgressRelay()
 
@@ -563,7 +584,11 @@ async def generate_midi(
         Field(description="Override the detected tempo for note quantisation."),
     ] = None,
 ) -> JobResult:
-    """Transcribe an audio file to MIDI."""
+    """Transcribe an audio file to MIDI.
+
+    Use to get notes out of audio. On a full mix, run stem_split first and transcribe the stem
+    you want. Counts as one run. MIDI files go to a new results folder; the source is unchanged.
+    """
     relay = ProgressRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
@@ -660,7 +685,9 @@ async def generate_music(
     """Generate music with the Audial music model.
 
     Text to music, covers, remixes, lego (re-render with one track emphasised),
-    or analysis (understand).
+    or analysis (understand). Use for new or transformed music, not to edit an existing mix:
+    that is master or stem_split. Takes a few minutes and counts as one run, and audio goes to
+    a new results folder.
     """
     relay = ProgressRelay()
 
@@ -844,8 +871,10 @@ async def text2vox(
 ) -> JobResult:
     """Synthesize a sung vocal (and MIDI) from lyrics, a melody and a reference voice.
 
-    lyrics_mode decides how the lyrics are lined up with the melody's notes; "per_note" is
-    the one that gives exact control. See the lyrics_mode and lyrics descriptions.
+    Needs both a reference clip of the voice and a melody, as MIDI or audio. lyrics_mode decides
+    how the lyrics are lined up with the melody's notes; "per_note" is the one that gives exact
+    control. See the lyrics_mode and lyrics descriptions. Takes a few minutes and counts as one
+    run. Audio and MIDI go to a new results folder.
     """
     relay = ProgressRelay()
 
@@ -993,7 +1022,11 @@ async def list_results(
         Field(description="Maximum number of jobs to return, newest first.", ge=1, le=100),
     ] = 10,
 ) -> list[JobResult]:
-    """List previous Audial results in the results folder, newest first."""
+    """List previous Audial results in the results folder, newest first.
+
+    Use when the user asks where an earlier output went. Reads the local folder only: no account
+    needed and nothing is sent anywhere.
+    """
     if _startup_error is not None:
         raise ToolError(str(_startup_error))
     try:
@@ -1043,7 +1076,11 @@ def _account() -> Account:
 
 @mcp.tool(title="Show the Audial account in use", annotations=LOCAL_READ_ONLY)
 async def account() -> Account:
-    """Show whether this computer is signed in to Audial, and as whom."""
+    """Show whether this computer is signed in to Audial, and as whom.
+
+    Use when a tool reports a credentials problem or the user asks which account is in use.
+    Reads local settings only.
+    """
     try:
         return _account()
     except Exception as exc:  # noqa: BLE001 — every failure becomes a ToolError
@@ -1077,7 +1114,11 @@ async def sign_in(
 
 @mcp.tool(title="Sign out of Audial", annotations=REMOTE)
 async def sign_out() -> Account:
-    """Sign out of Audial on this computer and disconnect it from the account."""
+    """Sign out of Audial on this computer and disconnect it from the account.
+
+    Only when the user asks to sign out or switch accounts. The next job asks them to sign in
+    again. Results already downloaded stay where they are.
+    """
     global _pending_sign_in
     try:
         if _settings.api_key:

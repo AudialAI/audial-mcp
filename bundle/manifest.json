@@ -1,0 +1,131 @@
+{
+  "manifest_version": "0.4",
+  "name": "audial-mcp",
+  "display_name": "Audial",
+  "version": "0.5.0",
+  "description": "Split stems, master tracks, build sample packs, convert audio to MIDI, make synth presets and generate music.",
+  "long_description": "Audial's hosted audio tools inside your AI assistant. Point it at a file on your computer and it can split stems, analyze tempo and key, find song sections, master a mix, build a sample pack, transcribe to MIDI, generate music, turn one sound into a Vital or Serum 2 preset, or sing lyrics in a reference voice. The first job opens a sign-in page in your browser. Results are saved to a folder you choose.",
+  "author": {
+    "name": "Audial",
+    "email": "contact@audialmusic.ai",
+    "url": "https://audialmusic.ai"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AudialAI/audial-mcp"
+  },
+  "homepage": "https://audialmusic.ai",
+  "documentation": "https://audialmusic.ai/resources/api-reference",
+  "support": "https://github.com/AudialAI/audial-mcp/issues",
+  "icon": "icon.png",
+  "server": {
+    "type": "uv",
+    "entry_point": "server/main.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "${__dirname}",
+        "server/main.py"
+      ],
+      "env": {
+        "AUDIAL_RESULTS_DIR": "${user_config.results_dir}"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "stem_split",
+      "description": "Split a track into separate instrument stems, optionally retimed and rekeyed."
+    },
+    {
+      "name": "analyze",
+      "description": "Analyze a track: BPM, key, loudness and other characteristics."
+    },
+    {
+      "name": "segment",
+      "description": "Detect song sections (intro, verse, chorus...) and analyze components within them."
+    },
+    {
+      "name": "master",
+      "description": "Master a mix, optionally matching a reference track."
+    },
+    {
+      "name": "generate_samples",
+      "description": "Extract a sample pack (one-shots and loops) from a track."
+    },
+    {
+      "name": "generate_midi",
+      "description": "Transcribe an audio file to MIDI."
+    },
+    {
+      "name": "generate_music",
+      "description": "Generate music with the Audial music model."
+    },
+    {
+      "name": "sound2vital",
+      "description": "Turn one isolated sound into an editable Audial Synth preset."
+    },
+    {
+      "name": "sound2serum",
+      "description": "Turn one isolated sound into an editable Xfer Serum 2 preset."
+    },
+    {
+      "name": "text2vox",
+      "description": "Synthesize a sung vocal (and MIDI) from lyrics, a melody and a reference voice."
+    },
+    {
+      "name": "service_status",
+      "description": "Which Audial tools have a worker awake right now, and what a cold one will cost."
+    },
+    {
+      "name": "pipeline_status",
+      "description": "Look up an Audial pipeline by id: its state, each step, and the outputs so far."
+    },
+    {
+      "name": "list_results",
+      "description": "List previous Audial results in the results folder, newest first."
+    },
+    {
+      "name": "account",
+      "description": "Show whether this computer is signed in to Audial, and as whom."
+    },
+    {
+      "name": "sign_in",
+      "description": "Sign in to Audial through the user's browser. Opens an approval page and waits for it."
+    },
+    {
+      "name": "sign_out",
+      "description": "Sign out of Audial on this computer and disconnect it from the account."
+    }
+  ],
+  "user_config": {
+    "results_dir": {
+      "type": "directory",
+      "title": "Results folder",
+      "description": "Where Audial saves the files it makes.",
+      "default": "${HOME}/Audial",
+      "required": false
+    }
+  },
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "win32"
+    ],
+    "runtimes": {
+      "python": ">=3.10"
+    }
+  },
+  "keywords": [
+    "audio",
+    "music",
+    "stems",
+    "mastering",
+    "midi",
+    "synth",
+    "audial"
+  ],
+  "license": "MIT"
+}
