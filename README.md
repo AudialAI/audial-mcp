@@ -25,7 +25,7 @@ claude mcp add audial -e AUDIAL_RESULTS_DIR=~/Audial -- uvx audial-mcp
 
 **Claude Desktop, one click**
 
-Download `audial-mcp-<version>.mcpb` from the [latest release](https://github.com/AudialAI/audial-mcp/releases/latest) and double-click it. You need `uv` and no config.
+Download `audial-mcp-<version>.mcpb` from the [latest release](https://github.com/AudialAI/audial-mcp/releases/latest) and double-click it. Claude Desktop fetches what it needs, so there is nothing else to install or configure.
 
 **Claude Desktop / Cursor / any client with a JSON config**
 
