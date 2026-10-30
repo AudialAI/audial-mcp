@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "audial-mcp"
-version = "0.4.0"
+version = "0.4.1"
 description = "MCP server for Audial: stem splitting, mastering, MIDI, music generation, resynthesis to Vital or Serum 2, and vocal synthesis from any MCP client."
 readme = "README.md"
 license = "MIT"
