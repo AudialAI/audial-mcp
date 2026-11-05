@@ -3,7 +3,8 @@
 [![AllMCPs Verified](https://allmcps.com/api/badge/audial)](https://allmcps.com/mcp/audial?verify=655ada1a-49b7-4930-9ec2-2e5ed7eaa6c6)
 
 Powered by [Audial](https://audialmusic.ai?utm_source=github&utm_medium=readme&utm_campaign=mcp) — run Audial's hosted audio tools from any MCP
-client: split stems, analyze and segment audio, master tracks, build sample packs, convert
+client: split stems, analyze audio, find a song's sections, tempo and bars and add audio
+features, tags or timed lyrics to that analysis, master tracks, build sample packs, convert
 audio to MIDI, generate music, turn a one-shot into an editable Audial Synth or Serum 2
 preset, and sing lyrics in a reference voice. See the [API reference](https://audialmusic.ai/resources/api-reference?utm_source=github&utm_medium=readme&utm_campaign=mcp)
 for details on what each tool calls.
@@ -61,9 +62,12 @@ page. A key set this way takes priority over a saved sign-in.
 |---|---|
 | `stem_split` | Split a track into vocals, drums, bass, other (optionally retime / rekey) |
 | `analyze` | BPM, key and other characteristics |
-| `segment` | Sections and component analysis -- splits stems, then segments them; one call |
+| `segment` | Song sections, tempo and bars from the mix, in about half a minute; returns an `analysis_id` |
+| `audio_features` | Energy, danceability, loudness, mode, key and tatum, for the song and each section |
+| `tag_audio` | Genre, moods, instruments and artist tags, for the mix, bass and melody |
+| `get_lyrics` | Lyrics as timed lines (word timings in the saved file) |
 | `master` | Mastering, optionally matched to a reference |
-| `generate_samples` | Sample pack from a track -- splits stems, then builds the pack; one call |
+| `generate_samples` | Sample pack from an analysis, or from a file in one call |
 | `generate_midi` | Audio to MIDI |
 | `generate_music` | Text to music, covers, remixes, lego and understand with the Audial music model |
 | `sound2vital` | One isolated sound → editable Audial Synth (Vital) preset. Not for loops or melodies |
@@ -73,11 +77,31 @@ page. A key set this way takes priority over a saved sign-in.
 | `service_status` | Which tools have a worker awake right now, and what a cold start will cost |
 | `list_results` | Browse previous results in your results folder |
 
-`segment` and `generate_samples` run as Audial *pipelines*: both need separated stems, so the
-API splits stems and then runs the step you asked for as one job. Each step is reported as it
-starts and finishes ("stem-split completed in 41 s; sample-pack running"), and the pipeline id
-comes back as the result's `execution_id` -- pass it to `pipeline_status` to check on a job
-whose call timed out.
+## Analysis and add-ons
+
+`segment` analyses the mix in about half a minute: no stems needed. It returns the sections
+(with their phrases) and a tempo map, plus an `analysis_id`. Beats and bars aren't listed one by
+one: `grid` describes them -- where each constant-tempo piece starts, its BPM, and its bar and
+beat. Every beat time is `start + k × 60 / bpm`. Most tracks have one piece.
+
+Pass the `analysis_id` to `audio_features`, `tag_audio`, `get_lyrics` or `generate_samples` to
+add that result to the analysis, whenever you like. Nothing is uploaded again. Each of them also
+takes a `file_path` instead, and then runs `segment` on it first.
+
+- Audio features need nothing more, so they can run straight after the analysis.
+- Tags, lyrics and the sample pack read the track's stems. Audial makes them automatically
+  after each analysis, so right after a new one these tools wait a few minutes for them.
+- If a tool analysed a file and the next step failed or timed out, the error gives the new
+  `analysis_id`: call the tool again with it, rather than with the file.
+
+An analysis counts as one run. Everything you add to it (features, tags, lyrics, a sample pack)
+is included.
+
+`generate_samples` on a file runs as an Audial *pipeline*: it prepares the track (analysis and
+stems together), then builds the pack, as one job. Each step is reported as it starts and
+finishes ("prepare completed in 41 s; sample-pack running"). The pipeline id comes back as the
+result's `execution_id` -- pass it to `pipeline_status` to check on a job whose call timed out.
+`segment` with `features` (kept for older integrations) is a pipeline as well.
 
 ## Per-note lyrics
 
@@ -105,10 +129,12 @@ anything is uploaded.
 
 ## Cold starts
 
-Audial's GPU workers scale to zero, so the first job after an idle period spends a few extra
-minutes starting one and loading the model; every job after it is fast. Audial reports that
-phase on the job it is already polling, and every tool here relays it as a progress
-notification and a log line:
+Audial's workers scale to zero, so the first job after an idle period spends extra time
+starting one and loading the model -- a few minutes on a GPU tool; every job after it is fast.
+The analysis and each add-on (`audio_features`, `tag_audio`, `get_lyrics`) run on workers of
+their own, so the first add-on after a quiet spell can start up for a minute or more even when
+`segment` was quick. Audial reports that phase on the job it is already polling, and every
+tool here relays it as a progress notification and a log line:
 
 ```
 Warming up the machine — the first request takes a few minutes longer than usual
@@ -124,6 +150,12 @@ the same question before you start anything, so a long wait can be explained in 
 Audio and text you pass to a tool are uploaded to Audial's API (https://api.audialmusic.ai)
 over HTTPS and processed on Audial's servers; results are downloaded into
 `AUDIAL_RESULTS_DIR` (default `~/Audial`). Nothing else is sent.
+
+A tool given an `analysis_id` uploads nothing: it works on the audio Audial already has for
+that analysis. Audial makes and keeps the track's stems with each analysis, like your
+other results. To fill in artist tags, `tag_audio` has Audial's servers look up the track's
+title and artist in a public music database; that lookup gets the title and artist, never the
+audio.
 
 Two other files are *read* if they exist, because the Audial SDK looks for them:
 `~/.audial/.audial_config.json` and a `.env` in the directory the server was started from.

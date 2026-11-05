@@ -21,6 +21,9 @@ TOOLS = {
     "stem_split",
     "analyze",
     "segment",
+    "audio_features",
+    "tag_audio",
+    "get_lyrics",
     "master",
     "generate_samples",
     "generate_midi",
@@ -85,10 +88,19 @@ def fake_sdk(monkeypatch, name, *, produce=("vocals.wav",), returns=None, calls=
     return calls
 
 
+# Claude Code cuts tool descriptions and server instructions at 2 KB; past that the model sees
+# a truncated text. The longest description today is well under half of it.
+CLIENT_DESCRIPTION_LIMIT = 2048
+
+
 @pytest.mark.anyio
-async def test_lists_all_tools(client):
-    tools = await client.list_tools()
-    assert {t.name for t in tools.tools} == TOOLS
+async def test_tool_list(client):
+    tools = (await client.list_tools()).tools
+    assert {t.name for t in tools} == TOOLS
+    assert len(tools) == len(TOOLS) == 19
+    for tool in tools:
+        assert len(tool.description) < CLIENT_DESCRIPTION_LIMIT, tool.name
+    assert len(server_mod.INSTRUCTIONS) < CLIENT_DESCRIPTION_LIMIT
 
 
 @pytest.mark.anyio
@@ -367,12 +379,19 @@ def test_every_release_file_names_the_same_version():
 
 
 @pytest.mark.anyio
-async def test_the_bundle_lists_every_tool(client):
+async def test_manifest_matches_server(client):
+    """The bundle lists every registered tool, each with its description's first line."""
     root = Path(__file__).resolve().parent.parent
     manifest = json.loads((root / "bundle" / "manifest.json").read_text())
-    assert {t["name"] for t in manifest["tools"]} == {
-        t.name for t in (await client.list_tools()).tools
-    }
+    registered = {t.name: t.description for t in (await client.list_tools()).tools}
+    assert [t["name"] for t in manifest["tools"]] == list(registered)
+    for entry in manifest["tools"]:
+        assert entry["description"] == registered[entry["name"]].splitlines()[0], entry["name"]
+
+
+def test_the_registry_description_fits():
+    root = Path(__file__).resolve().parent.parent
+    assert len(json.loads((root / "server.json").read_text())["description"]) <= 100
 
 
 @pytest.mark.anyio
@@ -546,7 +565,6 @@ def test_a_bad_timeout_does_not_crash_the_import(tmp_path):
 SDK_TOOL_ARGS = {
     "stem_split": {"file_path": "{wav}", "stems": ["vocals"], "target_bpm": 90},
     "analyze": {"file_path": "{wav}"},
-    "segment": {"file_path": "{wav}", "components": ["drums"], "genre": "house"},
     "master": {"file_path": "{wav}", "reference_file": "{wav}"},
     "generate_samples": {"file_path": "{wav}", "components": ["drums"]},
     "generate_midi": {"file_path": "{wav}", "bpm": 120},
@@ -580,6 +598,52 @@ async def test_tool_kwargs_bind_to_the_real_sdk_signatures(client, tmp_path, wav
         assert not result.is_error, f"{name}: {result.content[0].text}"
         _, kwargs = calls[0]
         inspect.signature(real).bind(**kwargs)
+
+
+def _sdk_version() -> tuple[int, ...]:
+    return tuple(int(part) for part in re.findall(r"\d+", audial.__version__)[:3])
+
+
+# The calls that need audial-sdk 1.6: the analysis and the add-ons on it. Each entry is the tool,
+# its arguments and the SDK functions it calls, in order.
+SDK_16_TOOL_CALLS = [
+    ("segment", {"file_path": "{wav}", "genre": "House", "edm": True}, ["segment"]),
+    ("segment", {"file_path": "{wav}", "features": ["energy", "tags"]}, ["segment"]),
+    ("generate_samples", {"analysis_id": "-Pa1", "components": ["drums"]}, ["generate_samples"]),
+    ("audio_features", {"analysis_id": "-Pa1"}, ["audio_features"]),
+    ("tag_audio", {"analysis_id": "-Pa1"}, ["tags"]),
+    ("get_lyrics", {"file_path": "{wav}"}, ["segment", "lyrics"]),
+]
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(_sdk_version() < (1, 6), reason="needs audial-sdk 1.6.0 installed")
+@pytest.mark.parametrize("tool,template,sdk_names", SDK_16_TOOL_CALLS)
+async def test_analysis_kwargs_bind_to_the_real_sdk_signatures(
+    client, wav, monkeypatch, tool, template, sdk_names
+):
+    """As above, for the tools built on SDK 1.6's analysis functions."""
+    real = {name: getattr(audial, name) for name in sdk_names}
+    calls: dict[str, dict] = {}
+
+    def recorder(name):
+        def fn(**kwargs):
+            calls[name] = kwargs
+            if "results_folder" in kwargs:
+                (Path(kwargs["results_folder"]) / f"{name}.json").write_bytes(b"{}")
+            return {"analysis_id": "-Pa1", "lines": []}
+
+        return fn
+
+    for name in sdk_names:
+        monkeypatch.setattr(server_mod.audial, name, recorder(name), raising=False)
+    args = {k: str(wav) if v == "{wav}" else v for k, v in template.items()}
+    result = await client.call_tool(tool, args)
+    assert not result.is_error, result.content[0].text
+    assert list(calls) == sdk_names
+    for name, kwargs in calls.items():
+        assert callable(real[name]), f"audial.{name} is not a function"
+        inspect.signature(real[name]).bind(**kwargs)
 
 
 # ---------------------------------------------------------------------------

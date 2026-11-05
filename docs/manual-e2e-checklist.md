@@ -136,6 +136,41 @@ deleted after the run, see "Cleanup" at the bottom).
   `api.audialmusic.ai` directly.
 - [ ] Windows: not tested (see design open question 6).
 
+## 0.6.0: the analysis and its add-ons — not yet run
+
+Run against the dev API once it serves the analysis add-ons, with audial-sdk 1.6.0 installed,
+in Claude Desktop with the 0.6.0 bundle (`scripts/build_mcpb.sh`), and repeat 11–13 in Claude
+Code. Use `song30s.wav` (has vocals) and an instrumental clip. Record execution ids as above.
+
+- [ ] **11. `list_tools`**: 19 tools (`segment`, `audio_features`, `tag_audio`, `get_lyrics`
+  among them), every parameter documented.
+- [ ] **12. `segment`** on `song30s.wav`: finishes in about half a minute warm (note the cold
+  time too). `metadata` has `analysis_id`, `audio_segmentation.grid` and `sections`, and no
+  `beat_times`; the summary names the `analysis_id`. One `analysis.json` in the job folder.
+  The allowance (`GET /functions/allowance`) drops by one.
+- [ ] **13. `audio_features`** with that `analysis_id`: `metadata.song` has energy,
+  danceability, loudness, mode, key; `metadata.sections` one entry per section, and the values
+  differ between sections. `features.json` in the job folder. The allowance does not change.
+- [ ] **14. `tag_audio`** with a `file_path` (a track not yet analysed): runs `segment`
+  first, then waits for the stems ("Preparing the track…" in the logs) and returns `genre`
+  and `song_tags`. Two files: `analysis.json` and `tags.json`. The allowance drops by one,
+  not two.
+- [ ] **15. `get_lyrics`** with the `analysis_id` from 12: `metadata.lines` are timed lines
+  (`start`, `end`, `text`) that match the song; `lyrics.json` holds the word timings. A
+  second call returns the same result at once (no new run).
+- [ ] **16. `get_lyrics`** on the instrumental: `is_instrumental` true, no lines, and the
+  summary says "No vocals in this track."
+- [ ] **17. `generate_samples`** with the `analysis_id` from 12: samples in the job folder, no
+  new analysis, and the allowance does not change.
+- [ ] **18. `service_status`** with `tool` = `audio_features`, `tag_audio`, `get_lyrics`:
+  each answers one item (`audio-features`, `audio-tags`, `lyrics`). Asked right after the
+  add-on workers have gone idle, the cold one gets a `notice`, and the next add-on's progress
+  shows the warm-up line.
+- [ ] **19. Error paths**: `get_lyrics` with `analysis_id="nope!"` is refused before any
+  request; with both `analysis_id` and `file_path` it asks for one. Called on a file with
+  `AUDIAL_JOB_TIMEOUT_S=60` so it times out while waiting for the stems: the error gives the
+  new `analysis_id`, and calling again with it finishes without a new analysis.
+
 ## Summary
 
 | # | Check | Result | Evidence |
@@ -151,6 +186,7 @@ deleted after the run, see "Cleanup" at the bottom).
 | 8 | error paths | PASS | missing file / missing creds / prod 402 all readable |
 | 9 | Claude Code | PASS | connects, calls tool, relays the dev 500 clearly, cleans up |
 | 10 | orphan check | PASS | exit 0, immediate, on stdin close |
+| 11–19 | analysis and add-ons (0.6.0) | **not yet run** | needs the dev API with the add-ons, and SDK 1.6.0 |
 
 **No `audial-mcp` code changes were made.** Every failure in this run (#2, #3, #6) traces to the
 dev-environment API and Audial's hosted GPU workers (a 409-wrapped-as-500 from

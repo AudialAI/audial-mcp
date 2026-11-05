@@ -9,9 +9,10 @@ way:
   SDK's `audial.warmup` turns it into the one sentence every Audial client
   shows -- website, CLI, plugins and this server -- so a cold start is
   explained instead of looking like a hang.
-* **Pipeline steps.** `segment` and `generate_samples` run as pipelines: stem
-  separation first, then the step the user asked for. The SDK reports each
-  poll and `audial.pipelines.StepTracker` reduces it to what changed.
+* **Pipeline steps.** `generate_samples` on a file runs as a pipeline (the
+  track is prepared, then the pack is built), and so does `segment` when it is
+  asked for `features` as well. The SDK reports each poll and
+  `audial.pipelines.StepTracker` reduces it to what changed.
 
 The SDK reports both to an `on_progress` callback, but it runs the job in a
 worker thread (see `jobs.run_job`), and the MCP context's `report_progress` /
@@ -54,8 +55,8 @@ class ProgressRelay:
         completed in 41 s", several in one poll reported together
         ("...; sample-pack running").
 
-        A plain execution (every tool but `segment` and `generate_samples`)
-        has no steps, so only the warm-up ever has anything to say.
+        A plain execution (everything but the two pipelines above) has no
+        steps, so only the warm-up ever has anything to say.
         """
         if not isinstance(status, dict):
             return

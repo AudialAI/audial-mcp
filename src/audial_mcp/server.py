@@ -17,6 +17,7 @@ import anyio
 import audial
 from audial.api import device_login
 from audial.api.constants import STATUS_FUNCTIONS
+from audial.api.exceptions import AudialError
 from audial.utils import config as sdk_config
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
@@ -50,15 +51,18 @@ INSTRUCTIONS = (
     "Audial runs hosted audio tools. Give tools full local file paths. Results are written to "
     "the user's Audial results folder and returned as file paths; tell the user where they are. "
     "Jobs take from a few seconds (analyze) to a few minutes (stem_split, generate_music, "
-    "sound2vital, sound2serum, text2vox); progress notifications report elapsed time. segment and "
-    "generate_samples run as pipelines -- they split stems first and then do the step asked "
-    "for, in one call -- and report each step as it starts and finishes; pipeline_status looks "
-    "one up again by id. Audial's GPU workers scale to zero, so the first job after an idle "
-    "period spends a few extra minutes starting one: that shows up as a 'Warming up the "
-    "machine' progress line, which is worth relaying to the user as the reason for the wait, "
-    "and service_status says in advance which tools are warm. Every job counts as one run "
-    "except analyze; a failed run does not count. Accounts without a subscription get a small "
-    "free allowance and then need a subscription: relay the error text if one is returned. "
+    "sound2vital, sound2serum, text2vox); progress notifications report elapsed time. segment "
+    "takes about half a minute and returns an analysis_id; audio_features, tag_audio, "
+    "get_lyrics and generate_samples take it to add to that analysis (given a file, they run "
+    "segment first). Tags, lyrics and sample packs wait a few minutes after a new analysis "
+    "while its stems are made. pipeline_status looks up a pipeline (generate_samples on a "
+    "file) by id. Audial's workers scale to zero, so the first job after an idle period "
+    "spends extra time starting one: that shows up as a 'Warming up the machine' progress "
+    "line, worth relaying to the user as the reason for the wait; service_status says in "
+    "advance which tools are warm. An analysis counts as one run and everything added to it "
+    "is included; every other job but analyze counts as one run; a failed run does not "
+    "count. Accounts without a subscription get a small free allowance and then need a "
+    "subscription: relay the error text if one is returned. "
     "No API key is needed: if the user is not signed in, the first tool call "
     "opens a sign-in page in their browser and continues once they approve. If a tool instead "
     "returns a sign-in link, give the user that link and the code, and retry when they say "
@@ -91,10 +95,18 @@ except ConfigError as exc:
 
 _TOOL_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
 
+# The add-on tools, by the name GET /functions/status reports them under. Their tool names are
+# this server's own, so the SDK's table of its function names does not translate them.
+_ADDON_FUNCTIONS = {
+    "audio_features": "audio-features",
+    "tag_audio": "audio-tags",
+    "get_lyrics": "lyrics",
+}
+
 # GET /functions/status reports each function under the API's own name
 # ("sample-pack"); the SDK accepts either spelling and `service_status` takes
 # both, so a model that read a status document back can ask about what it saw.
-_API_FUNCTIONS = frozenset(STATUS_FUNCTIONS.values())
+_API_FUNCTIONS = frozenset(STATUS_FUNCTIONS.values()) | frozenset(_ADDON_FUNCTIONS.values())
 
 # The SDK is given a little more patience than `run_job`'s watchdog, so the watchdog fires first
 # and the user gets `JobTimeout`'s guidance rather than a bare SDK timeout.
@@ -123,6 +135,9 @@ def _execution_id(raw: Any) -> str | None:
         for key in ("exeId", "exe_id", "execution_id", "pipelineId", "pipeline_id"):
             if isinstance(execution.get(key), str):
                 return execution[key]
+    # An analysis (segment, and the add-ons on one) is identified by its analysis id.
+    if isinstance(raw.get("analysis_id"), str):
+        return raw["analysis_id"]
     return None
 
 
@@ -182,13 +197,23 @@ def _redact_text(text: str) -> str:
     return text
 
 
-def _tool_error(exc: BaseException, *, tool: str, execution_id: str | None = None) -> ToolError:
+def _tool_error(
+    exc: BaseException,
+    *,
+    tool: str,
+    execution_id: str | None = None,
+    analysis_id: str | None = None,
+) -> ToolError:
     """`to_tool_error`, with credentials scrubbed out of the message it produces.
 
     Upstream error text can quote the request it failed on, which may carry the user id.
     """
     error = to_tool_error(
-        exc, tool=tool, execution_id=execution_id, api_key_from_env=bool(_settings.api_key)
+        exc,
+        tool=tool,
+        execution_id=execution_id,
+        api_key_from_env=bool(_settings.api_key),
+        analysis_id=analysis_id,
     )
     return ToolError(_redact_text(str(error)))
 
@@ -219,6 +244,26 @@ def _resynth_advice(tool: str, raw: Any) -> str:
                 "the input to a single note and run it again."
             )
     return "".join(f" {note}" for note in notes)
+
+
+ADDON_TOOLS = ("audio_features", "tag_audio", "get_lyrics", "generate_samples")
+
+
+def _analysis_note(tool: str, raw: Any) -> str:
+    """The analysis id a result carries, said in the summary so the model reuses it."""
+    if not isinstance(raw, dict) or not isinstance(raw.get("analysis_id"), str):
+        return ""
+    analysis_id = raw["analysis_id"]
+    if tool == "segment":
+        others = ", ".join(ADDON_TOOLS[:-1]) + f" or {ADDON_TOOLS[-1]}"
+        return (
+            f" analysis_id: {analysis_id}. Pass it to {others} to add to this analysis; that "
+            "uploads nothing and does not count as another run."
+        )
+    note = f" analysis_id: {analysis_id} (reuse it for the other add-ons)."
+    if tool == "get_lyrics" and raw.get("is_instrumental") is True:
+        note += " No vocals in this track."
+    return note
 
 
 def _tool_filter(tool: str) -> str:
@@ -322,13 +367,21 @@ async def _apply_credentials(ctx: Context) -> None:
 
 
 async def _execute(
-    ctx: Context, tool: str, plan: Plan, relay: ProgressRelay | None = None
+    ctx: Context,
+    tool: str,
+    plan: Plan,
+    relay: ProgressRelay | None = None,
+    made: dict[str, str] | None = None,
 ) -> JobResult:
     """Common path: validate → credentials → job folder → run in thread → inventory → JobResult.
 
     `relay` is the tool's progress relay: the SDK fills it from the worker
     thread with each warm-up phase (and, for the pipeline tools, each step
     change) and `run_job` drains it to the client.
+
+    `made` is filled by an add-on tool's call with the `analysis_id` of an analysis it made
+    from a file on the way. If the add-on then fails or times out, the error names that id,
+    so the retry reuses the analysis instead of paying for a new one.
     """
     if _startup_error is not None:
         raise ToolError(str(_startup_error))
@@ -353,7 +406,7 @@ async def _execute(
         elapsed = int(time.monotonic() - started)
         summary = f"{tool} finished in {elapsed} s: {len(files)} file(s) in {output_dir}"
         log.info("%s", summary)
-        advice = _resynth_advice(tool, raw)
+        advice = _resynth_advice(tool, raw) + _analysis_note(tool, raw)
         # The job is done; a failed progress notification must not turn it into an error.
         with contextlib.suppress(Exception):
             await ctx.report_progress(elapsed, total=elapsed, message=summary)
@@ -368,18 +421,177 @@ async def _execute(
     except Exception as exc:  # noqa: BLE001 — every failure becomes a ToolError
         if output_dir is not None:
             _discard_if_empty(output_dir)
-        raise _tool_error(exc, tool=tool, execution_id=execution_id) from None
+        raise _tool_error(
+            exc,
+            tool=tool,
+            execution_id=execution_id,
+            analysis_id=(made or {}).get("analysis_id"),
+        ) from None
 
 
-FilePath = Annotated[
-    str,
+AUDIO_FILE = (
+    "Full path to a local audio file (.wav, .mp3, .aif, .aiff, .flac, .m4a, .ogg, .aac). "
+    "~ is expanded."
+)
+
+FilePath = Annotated[str, Field(description=AUDIO_FILE)]
+
+AnalysisId = Annotated[
+    str | None,
     Field(
         description=(
-            "Full path to a local audio file (.wav, .mp3, .aif, .aiff, .flac, .m4a, .ogg, "
-            ".aac). ~ is expanded."
+            "The analysis_id a segment result returned (in its metadata and summary). Reuses "
+            "that analysis: nothing is uploaded and it does not count as another run. Give "
+            "this or file_path."
         )
     ),
 ]
+
+AnalysisFilePath = Annotated[
+    str | None,
+    Field(
+        description=(
+            f"{AUDIO_FILE} For a track that has not been analysed yet: segment runs on it "
+            "first (one run). Give this or analysis_id."
+        )
+    ),
+]
+
+# Analysis ids are execution ids (Firebase push keys, or a pipeline id for an analysis made by
+# a pipeline). The SDK puts them into request paths, so they are checked here first.
+_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
+def _analysis_source(
+    analysis_id: str | None, file_path: str | None
+) -> tuple[str | None, Path | None]:
+    """Exactly one of an analysis id or a file: `(analysis_id, None)` or `(None, file)`."""
+    if analysis_id and file_path:
+        raise ValidationError(
+            "Give analysis_id or file_path, not both: analysis_id reuses an analysis, "
+            "file_path analyses the file first."
+        )
+    if analysis_id:
+        if not _ID_RE.fullmatch(analysis_id):
+            raise ValidationError(
+                f"{analysis_id!r} is not an analysis id (letters, digits, '_' and '-' only). "
+                "Use the analysis_id a segment result returned."
+            )
+        return analysis_id, None
+    if file_path:
+        return None, check_file(file_path, AUDIO_EXTENSIONS, "audio file")
+    raise ValidationError(
+        "Give the analysis_id a segment result returned, or the file_path of a track to "
+        "analyse first."
+    )
+
+
+def _segment(src: Path, out: Path, relay: ProgressRelay, **options: Any) -> Any:
+    """One analysis of the mix, saved into the job folder.
+
+    `expand_beats=False`: the SDK can add per-beat and per-bar lists rebuilt from the tempo
+    map, for scripts written against older analysis files. A model reads the tempo map
+    (`grid`) directly, and the lists would only make the result longer.
+    """
+    return audial.segment(
+        file_path=str(src),
+        **options,
+        results_folder=str(out),
+        on_progress=relay.on_progress,
+        expand_beats=False,
+        max_wait=_settings.job_timeout_s + SDK_WAIT_HEADROOM_S,
+    )
+
+
+def _analysis_id_of(analysis: Any) -> str:
+    analysis_id = analysis.get("analysis_id") if isinstance(analysis, dict) else None
+    if not isinstance(analysis_id, str) or not analysis_id:
+        raise AudialError("The analysis finished without an analysis id, so nothing was added.")
+    return analysis_id
+
+
+def _without_alias(analysis: Any) -> Any:
+    """The SDK also returns the analysis as `segmentation` (its 1.5 name): drop the copy."""
+    if isinstance(analysis, dict) and analysis.get("segmentation") is analysis.get(
+        "audio_segmentation"
+    ):
+        return {k: v for k, v in analysis.items() if k != "segmentation"}
+    return analysis
+
+
+async def _addon(
+    ctx: Context,
+    tool: str,
+    sdk_name: str,
+    analysis_id: str | None,
+    file_path: str | None,
+    shape: Callable[[Any], dict[str, Any]],
+) -> JobResult:
+    """Run one add-on on an analysis, analysing `file_path` first when no id is given.
+
+    The SDK's add-on functions wait for the run to finish (and, for the add-ons that read
+    them, for the stems), save the result into the job folder and return it; `shape` turns it
+    into `metadata`. When a file was analysed here, the analysis is saved in the same folder.
+    """
+    relay = ProgressRelay()
+    made: dict[str, str] = {}
+
+    def plan() -> tuple[str, Callable[[Path], Any]]:
+        given, src = _analysis_source(analysis_id, file_path)
+        slug = slugify(src.stem) if src is not None else slugify(given or "", "analysis")
+
+        def call(out: Path) -> dict[str, Any]:
+            aid = given
+            if src is not None:
+                aid = _analysis_id_of(_segment(src, out, relay))
+                made["analysis_id"] = aid
+            result = getattr(audial, sdk_name)(
+                analysis_id=aid,
+                results_folder=str(out),
+                on_progress=relay.on_progress,
+                max_wait=_settings.job_timeout_s + SDK_WAIT_HEADROOM_S,
+            )
+            return {**shape(result), "analysis_id": aid}
+
+        return slug, call
+
+    return await _execute(ctx, tool, plan, relay=relay, made=made)
+
+
+def _as_dict(result: Any) -> dict[str, Any]:
+    return dict(result) if isinstance(result, dict) else {"result": result}
+
+
+def _word(entry: Any) -> str:
+    """The text of one timed word: `[word, start, end]` or `{"word"|"text", ...}`."""
+    if isinstance(entry, (list, tuple)) and entry and isinstance(entry[0], str):
+        return entry[0].strip()
+    if isinstance(entry, dict):
+        text = entry.get("word", entry.get("text"))
+        return text.strip() if isinstance(text, str) else ""
+    return ""
+
+
+def _timed_lines(lines: Any) -> list[dict[str, Any]]:
+    """Lyric lines as `{start, end, text}`; the word timings stay in the saved file."""
+    timed: list[dict[str, Any]] = []
+    for line in lines if isinstance(lines, list) else []:
+        if not isinstance(line, dict):
+            continue
+        text = line.get("text")
+        if not isinstance(text, str):
+            text = " ".join(w for w in map(_word, line.get("words") or []) if w)
+        timed.append({"start": line.get("start"), "end": line.get("end"), "text": text.strip()})
+    return timed
+
+
+def _lyrics_metadata(result: Any) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        return {"result": result}
+    # `segments` is the same lines again in the older shape.
+    shaped = {k: v for k, v in result.items() if k not in ("lines", "segments")}
+    shaped["lines"] = _timed_lines(result.get("lines"))
+    return shaped
 
 
 @mcp.tool(title="Split stems", annotations=REMOTE)
@@ -454,45 +666,108 @@ async def analyze(ctx: Context, file_path: FilePath) -> JobResult:
 async def segment(
     ctx: Context,
     file_path: FilePath,
-    components: Annotated[
-        list[str] | None,
-        Field(description="Components to analyze, e.g. ['vocals', 'drums']."),
-    ] = None,
-    analysis_type: Annotated[
+    genre: Annotated[
         str | None,
-        Field(description="Analysis type accepted by Audial's segmentation."),
+        Field(
+            description=(
+                "Genre hint for the section names, e.g. 'Tech House', 'Pop' or 'Drum N Bass' "
+                "(a name Audial does not know returns the list)."
+            )
+        ),
+    ] = None,
+    edm: Annotated[
+        bool | None,
+        Field(
+            description=(
+                "true: dance section names (INTRO, UP, CHORUS, DOWN, OUTRO); false: song "
+                "section names (INTRO, VERSE, UP, CHORUS, OUTRO). Default: from the genre, "
+                "else from the audio."
+            )
+        ),
     ] = None,
     features: Annotated[
         list[str] | None,
-        Field(description="Features to compute per segment."),
-    ] = None,
-    genre: Annotated[
-        str | None,
-        Field(description="Genre hint that improves section detection."),
+        Field(
+            description=(
+                "Optional, kept for older integrations: also compute these in the same call "
+                "(mode, energy, loudness, danceability, tatum, tags, lyrics). The call then "
+                "waits for them, minutes for tags and lyrics. Simpler: audio_features, "
+                "tag_audio or get_lyrics afterwards with the analysis_id."
+            )
+        ),
     ] = None,
 ) -> JobResult:
-    """Detect song sections (intro, verse, chorus...) and analyze components within them.
+    """Find song sections, tempo and bars (about half a minute).
 
-    Use for song structure. For tempo and key alone use analyze. Runs the `segmentation`
-    pipeline: splits stems, then segments them; one call, counted as one run. Tempo and key
-    are detected automatically. Takes a few minutes and each step is reported as it starts and
-    finishes. If the call times out the job keeps running: pipeline_status finds it.
+    Use for song structure. Send the mix: no stems needed, and it counts as one run. The result
+    has the sections (with their phrases) and a tempo map. Beats and bars are not listed one by
+    one: `grid` describes them -- where each constant-tempo piece starts, its BPM, and its bar
+    and beat. Every beat time is start + k * 60 / bpm, and most tracks have one piece. The
+    `analysis_id` it returns adds audio_features, tag_audio, get_lyrics or generate_samples to
+    this analysis without another run. For tempo and key alone, analyze is quicker.
     """
     relay = ProgressRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
         src = check_file(file_path, AUDIO_EXTENSIONS, "audio file")
-        return slugify(src.stem), lambda out: audial.segment(
-            file_path=str(src),
-            components=components,
-            analysis_type=analysis_type,
-            features=features,
-            genre=genre,
-            results_folder=str(out),
-            on_progress=relay.on_progress,
+        return slugify(src.stem), lambda out: _without_alias(
+            _segment(src, out, relay, genre=genre, edm=edm, features=features)
         )
 
     return await _execute(ctx, "segment", plan, relay=relay)
+
+
+@mcp.tool(title="Audio features", annotations=REMOTE)
+async def audio_features(
+    ctx: Context,
+    analysis_id: AnalysisId = None,
+    file_path: AnalysisFilePath = None,
+) -> JobResult:
+    """Measure energy, danceability, loudness, mode, key and tatum, for the song and each section.
+
+    Give the analysis_id from segment: nothing is uploaded and it is included in that analysis's
+    run. A file_path runs segment first (one run). Needs no stems, so it can run straight after
+    segment. Energy and danceability run 0-1: energy reflects loudness, rhythmic activity and
+    low end; danceability, how strong and regular the beat is. Both are measured per section,
+    so a drop reads higher than its breakdown. Loudness is in LUFS. The values are in
+    `metadata` (`song`, `sections`) and saved to the results folder.
+    """
+    return await _addon(ctx, "audio_features", "audio_features", analysis_id, file_path, _as_dict)
+
+
+@mcp.tool(title="Tag audio", annotations=REMOTE)
+async def tag_audio(
+    ctx: Context,
+    analysis_id: AnalysisId = None,
+    file_path: AnalysisFilePath = None,
+) -> JobResult:
+    """Tag a track: genre, moods, instruments and artist tags, for the mix, bass and melody.
+
+    Give the analysis_id from segment: nothing is uploaded and it is included in that analysis's
+    run. A file_path runs segment first (one run). Tags read the track's stems, which Audial
+    makes automatically after each analysis: right after a new analysis this waits for them (a
+    few minutes). Genres read like "Electronic---UK Garage"; the part after "---" is the
+    genre. The tags are in `metadata` (`genre`, `song_tags`) and saved to the results folder.
+    """
+    return await _addon(ctx, "tag_audio", "tags", analysis_id, file_path, _as_dict)
+
+
+@mcp.tool(title="Get lyrics", annotations=REMOTE)
+async def get_lyrics(
+    ctx: Context,
+    analysis_id: AnalysisId = None,
+    file_path: AnalysisFilePath = None,
+) -> JobResult:
+    """Transcribe a track's lyrics as timed lines.
+
+    Give the analysis_id from segment: nothing is uploaded and it is included in that analysis's
+    run. A file_path runs segment first (one run). Lyrics read the vocal stem, which Audial makes
+    automatically after each analysis: right after a new analysis this waits for it (a few
+    minutes). `metadata.lines` has one {start, end, text} per line in seconds on the track's
+    timeline, `lyrics` the whole text and `section_lyrics` one entry per section. Word timings
+    are in the saved lyrics.json. An instrumental comes back with `is_instrumental` true.
+    """
+    return await _addon(ctx, "get_lyrics", "lyrics", analysis_id, file_path, _lyrics_metadata)
 
 
 @mcp.tool(title="Master a track", annotations=REMOTE)
@@ -536,7 +811,10 @@ async def master(
 @mcp.tool(title="Generate a sample pack", annotations=REMOTE)
 async def generate_samples(
     ctx: Context,
-    file_path: FilePath,
+    file_path: Annotated[
+        str | None, Field(description=f"{AUDIO_FILE} Give this or analysis_id.")
+    ] = None,
+    analysis_id: AnalysisId = None,
     job_type: Annotated[
         str | None,
         Field(
@@ -553,18 +831,25 @@ async def generate_samples(
 ) -> JobResult:
     """Extract a sample pack (one-shots and loops) from a track.
 
-    Use when the user wants drum hits or loops taken from a finished track. Runs the
-    `sample-pack` pipeline: splits stems, then builds the sample pack; one call, counted as one
-    run. Tempo and key are detected automatically. Takes a few minutes and each step is reported
-    as it starts and finishes. If the call times out the job keeps running: pipeline_status
-    finds it. Samples go to a new results folder.
+    Use when the user wants drum hits or loops taken from a finished track. With the
+    analysis_id from segment, the pack is built from that analysis's sections and the stems
+    Audial made for it: nothing is uploaded and it is included in the analysis's run (right
+    after a new analysis it waits a few minutes for the stems). With file_path it runs the
+    `sample-pack` pipeline: prepares the track (analysis and stems together), then builds the
+    pack; one call, counted as one run, each step reported as it starts and finishes. If that
+    call times out the job keeps running: pipeline_status finds it. Samples go to a new
+    results folder.
     """
     relay = ProgressRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
-        src = check_file(file_path, AUDIO_EXTENSIONS, "audio file")
-        return slugify(src.stem), lambda out: audial.generate_samples(
-            file_path=str(src),
+        given, src = _analysis_source(analysis_id, file_path)
+        # Only the source that was given is passed, so an SDK without `analysis_id` still
+        # takes a file.
+        source = {"file_path": str(src)} if src is not None else {"analysis_id": given}
+        slug = slugify(src.stem) if src is not None else slugify(given or "", "analysis")
+        return slug, lambda out: audial.generate_samples(
+            **source,
             job_type=job_type,
             components=components,
             genre=genre,
@@ -922,9 +1207,9 @@ async def service_status(
         str | None,
         Field(
             description=(
-                "Audial tool to report on: stem_split, analyze, segment, master, "
-                "generate_samples, generate_midi, generate_music, sound2vital, sound2serum "
-                "or text2vox. Omit for all of them."
+                "Audial tool to report on: stem_split, analyze, segment, audio_features, "
+                "tag_audio, get_lyrics, master, generate_samples, generate_midi, "
+                "generate_music, sound2vital, sound2serum or text2vox. Omit for all of them."
             )
         ),
     ] = None,
@@ -940,13 +1225,19 @@ async def service_status(
     if _startup_error is not None:
         raise ToolError(str(_startup_error))
     try:
-        if tool is not None and tool not in STATUS_FUNCTIONS and tool not in _API_FUNCTIONS:
-            known = ", ".join(sorted(STATUS_FUNCTIONS))
+        if (
+            tool is not None
+            and tool not in STATUS_FUNCTIONS
+            and tool not in _ADDON_FUNCTIONS
+            and tool not in _API_FUNCTIONS
+        ):
+            known = ", ".join(sorted({*STATUS_FUNCTIONS, *_ADDON_FUNCTIONS}))
             raise ValidationError(
                 f"{tool!r} is not an Audial tool. Give one of: {known}, or omit it for all."
             )
         await _apply_credentials(ctx)
-        doc = await anyio.to_thread.run_sync(lambda: audial.status(tool))
+        function = _ADDON_FUNCTIONS.get(tool, tool) if tool is not None else None
+        doc = await anyio.to_thread.run_sync(lambda: audial.status(function))
         if not isinstance(doc, dict):
             return {"result": _redact(doc)}
 
@@ -976,7 +1267,7 @@ async def service_status(
 
 # Pipeline ids are Firebase push keys; the id is interpolated into the request path, so it is
 # checked before it leaves here rather than trusted because the model supplied it.
-_PIPELINE_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
+_PIPELINE_ID_RE = _ID_RE
 
 
 @mcp.tool(title="Pipeline status", annotations=READ_ONLY_REMOTE)
@@ -986,15 +1277,16 @@ async def pipeline_status(
         str,
         Field(
             description=(
-                "Id of a pipeline, as returned in `execution_id` by segment or generate_samples."
+                "Id of a pipeline, as returned in `execution_id` by generate_samples on a file "
+                "or by segment with `features`."
             )
         ),
     ],
 ) -> dict[str, Any]:
     """Look up an Audial pipeline by id: its state, each step, and the outputs so far.
 
-    Useful when a segment or generate_samples call timed out: the pipeline keeps running on
-    Audial's side and this says how far it got.
+    Useful when a generate_samples call on a file, or a segment call with `features`, timed
+    out: the pipeline keeps running on Audial's side and this says how far it got.
     """
     if _startup_error is not None:
         raise ToolError(str(_startup_error))
