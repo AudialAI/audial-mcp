@@ -64,7 +64,7 @@ page. A key set this way takes priority over a saved sign-in.
 | `analyze` | BPM, key and other characteristics |
 | `segment` | Song sections, tempo and bars from the mix, in about half a minute; returns an `analysis_id` |
 | `audio_features` | Energy, danceability, loudness, mode, key and tatum, for the song and each section |
-| `tag_audio` | Genre, moods, instruments and artist tags, for the mix, bass and melody |
+| `tag_audio` | Genre, moods, instruments and artist tags for the mix and each part, plus a written description |
 | `get_lyrics` | Lyrics as timed lines (word timings in the saved file) |
 | `master` | Mastering, optionally matched to a reference |
 | `generate_samples` | Sample pack from an analysis, or from a file in one call |

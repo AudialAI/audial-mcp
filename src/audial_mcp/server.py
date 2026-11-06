@@ -741,14 +741,14 @@ async def tag_audio(
     analysis_id: AnalysisId = None,
     file_path: AnalysisFilePath = None,
 ) -> JobResult:
-    """Tag a track: genre, moods, instruments and artist tags, for the mix, bass and melody.
+    """Tag a track: genre, moods, instruments and artist tags for the mix and each part, plus a written description.
 
     Give the analysis_id from segment: nothing is uploaded and it is included in that analysis's
     run. A file_path runs segment first (one run). Tags read the track's stems, which Audial
     makes automatically after each analysis: right after a new analysis this waits for them (a
-    few minutes). Genres read like "Electronic---UK Garage"; the part after "---" is the
-    genre. The tags are in `metadata` (`genre`, `song_tags`) and saved to the results folder.
-    """
+    few minutes). The tags are in `metadata` (`genre`, `song_tags`, `description`) and saved to
+    the results folder.
+    """  # noqa: E501 (the first line is the bundle manifest's text, word for word)
     return await _addon(ctx, "tag_audio", "tags", analysis_id, file_path, _as_dict)
 
 

@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "audial-mcp",
   "display_name": "Audial",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Split stems, find song sections, tags and lyrics, master tracks, build sample packs, convert audio to MIDI, make synth presets and generate music.",
   "long_description": "Audial's hosted audio tools inside your AI assistant. Point it at a file on your computer and it can split stems, analyze tempo and key, find song sections and bars in about half a minute, then add audio features (energy, danceability, loudness, mode), genre and mood tags, or lyrics as timed lines to that analysis. It can also master a mix, build a sample pack, transcribe to MIDI, generate music, turn one sound into a Vital or Serum 2 preset, or sing lyrics in a reference voice. The first job opens a sign-in page in your browser. Results are saved to a folder you choose.",
   "author": {
@@ -53,7 +53,7 @@
     },
     {
       "name": "tag_audio",
-      "description": "Tag a track: genre, moods, instruments and artist tags, for the mix, bass and melody."
+      "description": "Tag a track: genre, moods, instruments and artist tags for the mix and each part, plus a written description."
     },
     {
       "name": "get_lyrics",
