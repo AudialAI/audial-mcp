@@ -1,6 +1,8 @@
 # Release checklist
 1. Bump `version` in pyproject.toml and `__version__`; update `server.json`, `bundle/manifest.json` and `bundle/pyproject.toml` (a test checks they agree); update the
    Claude plugin's `.mcp.json` pin (`uvx audial-mcp==X.Y.Z`) and plugin.json version.
+   If the `audial-sdk` requirement moved, run `uv lock` once that SDK version is on PyPI: until
+   then `uv sync` (and CI) cannot resolve it.
 2. `uv run pytest -q`, ruff clean, manual checklist "Prod" section on the previous version.
 3. `git tag -a vX.Y.Z -m "audial-mcp X.Y.Z" && git push origin main vX.Y.Z` → publish workflow.
 4. Verify `pip index versions audial-mcp` / PyPI page; `uvx audial-mcp==X.Y.Z </dev/null`

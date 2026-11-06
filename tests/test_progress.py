@@ -1,8 +1,8 @@
 """Progress reporting: the relay, its wiring into run_job, and the tools.
 
 Two kinds of news reach the client while a job runs -- the machine warm-up phase (every
-tool) and pipeline step changes (`segment`, `generate_samples`). Both go through
-`ProgressRelay`.
+tool) and pipeline step changes (`generate_samples` on a file, `segment` with `features`).
+Both go through `ProgressRelay`.
 
 The Audial SDK is mocked throughout; nothing here talks to the service.
 """
@@ -247,12 +247,22 @@ async def test_pipeline_tools_forward_each_step_change(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("tool", ["generate_samples", "segment"])
-async def test_pipeline_tool_descriptions_name_the_steps(client, tool):
+async def test_pipeline_tool_descriptions_name_the_steps(client):
     described = {t.name: t.description for t in (await client.list_tools()).tools}
-    description = described[tool]
-    assert "splits stems" in description.lower()
-    assert "one call" in description.lower()
+    description = " ".join(described["generate_samples"].lower().split())
+    assert "prepares the track (analysis and stems together), then builds the pack" in description
+    assert "one call" in description
+
+
+@pytest.mark.anyio
+async def test_segment_is_described_as_the_fast_analysis_it_now_is(client):
+    """Analysis needs only the mix: no stems first, and about half a minute."""
+    described = {t.name: t.description for t in (await client.list_tools()).tools}
+    description = described["segment"]
+    assert description.startswith("Find song sections, tempo and bars (about half a minute).")
+    assert "no stems needed" in description and "analysis_id" in description
+    for stale in ("splits stems", "few minutes", "pipeline"):
+        assert stale not in description.lower(), stale
 
 
 @pytest.mark.anyio
