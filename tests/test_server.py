@@ -389,6 +389,16 @@ async def test_manifest_matches_server(client):
         assert entry["description"] == registered[entry["name"]].splitlines()[0], entry["name"]
 
 
+@pytest.mark.anyio
+async def test_tag_audio_description(client):
+    tool = next(t for t in (await client.list_tools()).tools if t.name == "tag_audio")
+    assert tool.description.splitlines()[0] == (
+        "Tag a track: genre, moods, instruments and artist tags for the mix and each part, "
+        "plus a written description."
+    )
+    assert "---" not in tool.description
+
+
 def test_the_registry_description_fits():
     root = Path(__file__).resolve().parent.parent
     assert len(json.loads((root / "server.json").read_text())["description"]) <= 100

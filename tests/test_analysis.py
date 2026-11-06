@@ -65,9 +65,16 @@ FEATURES = {
 }
 
 TAGS = {
-    "tags_version": 1,
-    "genre": ["Electronic---UK Garage"],
-    "song_tags": {"full": {"moods": ["dark"], "instruments": ["synth"], "artist_tags": []}},
+    "genre": ["UK Garage"],
+    "song_tags": {
+        "full": {"moods": ["dark"], "instruments": ["synth"], "artist_tags": ["uk garage"]},
+        "drums": {"moods": ["driving"], "instruments": ["kick"], "silent": False},
+        "bass": {"moods": ["deep"], "instruments": ["sub bass"], "silent": False},
+        "melody": {"moods": ["warm"], "instruments": ["electric piano"], "silent": False},
+        "vocals": {"moods": [], "instruments": [], "silent": True},
+    },
+    "description": "A driving UK garage cut built on a swung two-step groove.",
+    "warnings": [],
 }
 
 # Each add-on tool, the SDK function it calls, a result, and the file the SDK saves it as.
@@ -271,7 +278,8 @@ async def test_audio_features_and_tags_come_back_whole(client, sdk):
     tags = await client.call_tool("tag_audio", {"analysis_id": "-PaOld"})
     assert features.structured_content["metadata"]["song"]["energy"] == 0.71
     assert features.structured_content["metadata"]["sections"][0]["label"] == "INTRO"
-    assert tags.structured_content["metadata"]["genre"] == ["Electronic---UK Garage"]
+    assert tags.structured_content["metadata"]["genre"] == ["UK Garage"]
+    assert tags.structured_content["metadata"]["description"] == TAGS["description"]
 
 
 @pytest.mark.anyio
