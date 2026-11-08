@@ -127,6 +127,14 @@ syllable -- a lyric string that breaks either rule comes back as a tool error na
 note it is about ("note 1 has no syllable; the first note needs one (position 1)"), before
 anything is uploaded.
 
+text2vox sings one note at a time: the MIDI must be a single melody line, not chords or
+harmony. Two notes that start together (a chord), or a note that starts more than 50 ms
+before the previous one ends, is refused before anything runs, naming the note number and
+its time (`MELODY_INVALID`, or `LYRICS_INVALID` with `per_note`). Overlaps of 50 ms or less
+are trimmed automatically. With `per_note`, a note with no length (usually one stacked on
+another note of the same pitch) or a note that never ends is refused too. Nothing is
+charged for a refused file.
+
 ## Cold starts
 
 Audial's workers scale to zero, so the first job after an idle period spends extra time

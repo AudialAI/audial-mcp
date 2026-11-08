@@ -1318,7 +1318,16 @@ async def text2vox(
     midi_file: Annotated[
         str | None,
         FileArg,
-        Field(description="MIDI melody (.mid). Give this or melody_audio_file."),
+        Field(
+            description=(
+                "MIDI melody (.mid). Give this or melody_audio_file. text2vox sings one note "
+                "at a time: the MIDI must be a single melody line, not chords or harmony. Two "
+                "notes that start together, or a note that starts more than 50 ms before the "
+                "previous one ends, is refused before anything runs, naming the note number "
+                "and its time (overlaps of 50 ms or less are fine). With lyrics_mode=per_note, "
+                "a note with no length or a note that never ends is refused too."
+            )
+        ),
     ] = None,
     melody_audio_file: Annotated[
         str | None,
@@ -1345,7 +1354,8 @@ async def text2vox(
                 "'amazing' across notes 1-3 and 'grace' across notes 4-5, and needs a MIDI "
                 "file with exactly 9 notes. There is no rest token: a note that should be "
                 "silent must not be in the MIDI. The token count has to equal the note "
-                "count and the first token has to be a syllable, never a hold."
+                "count and the first token has to be a syllable, never a hold. The MIDI must also "
+                "be a single melody line (one note at a time, no chords or harmony)."
             )
         ),
     ] = "auto",
@@ -1379,7 +1389,8 @@ async def text2vox(
 ) -> JobResult:
     """Synthesize a sung vocal (and MIDI) from lyrics, a melody and a reference voice.
 
-    Needs both a reference clip of the voice and a melody, as MIDI or audio. lyrics_mode decides
+    Needs both a reference clip of the voice and a melody, as MIDI or audio. A MIDI melody must be
+    one note at a time: a single melody line, not chords or harmony. lyrics_mode decides
     how the lyrics are lined up with the melody's notes; "per_note" is the one that gives exact
     control. See the lyrics_mode and lyrics descriptions. Takes a few minutes and counts as one
     run. Audio and MIDI go to a new results folder.
