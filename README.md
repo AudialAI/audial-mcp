@@ -174,6 +174,43 @@ Every tool except `list_results` calls the Audial API, which requires an active 
 | `AUDIAL_JOB_TIMEOUT_S` | no | `900` |
 | `AUDIAL_API_BASE_URL` | no | production API |
 
+## Remote server (streamable HTTP)
+
+`audial-mcp --http` runs the same tools as a remote MCP server, for clients that connect to
+a URL instead of starting a local process. It serves streamable HTTP at `/mcp`.
+
+```bash
+uvx audial-mcp --http --host 0.0.0.0 --port 8000 --public-url https://mcp.example.com
+```
+
+It works differently from the local server:
+
+- **Each request brings its own Audial API key** as `Authorization: Bearer aud_...`, so one
+  server can serve many accounts. The server never uses a key from its own environment or a
+  sign-in saved on the host. The browser sign-in tools and `list_results` aren't offered.
+- **Files go in as links.** Each file argument is an https link to the file, or a file the
+  client attached, given as `{"download_url": ..., "file_id": ...}`. The server downloads it,
+  up to 100 MB, from public addresses only, and deletes it when the job ends. Local paths
+  are refused.
+- **Results come back as download links.** Each file's `path` is a link under
+  `<public url>/files/`, valid for 24 hours.
+- **Long jobs don't hold the call open.** A job still running after 40 seconds returns
+  `status: running` with a `job_id`. `check_job` takes that id and returns the result once
+  the job is done. Only the account that started a job can check it.
+
+| Variable / option | Default |
+|---|---|
+| `--host` / `AUDIAL_MCP_HOST` | `127.0.0.1` |
+| `--port` / `AUDIAL_MCP_PORT` / `PORT` | `8000` |
+| `--public-url` / `AUDIAL_MCP_PUBLIC_URL` (base of the download links) | `http://host:port` |
+| `--authorization-server` / `AUDIAL_MCP_AUTHORIZATION_SERVER` (published as OAuth protected-resource metadata) | none |
+| `AUDIAL_MCP_WAIT_S` (how long a call waits before returning a `job_id`) | `40` |
+| `AUDIAL_MCP_RESULTS_TTL_S` (how long download links last) | `86400` |
+| `AUDIAL_MCP_WORK_DIR` (downloaded inputs and results) | system temp folder |
+
+Jobs and results are kept by the process and its work folder, so run one instance.
+`GET /healthz` reports the version.
+
 ## License
 
 MIT. Source: https://github.com/AudialAI/audial-mcp
