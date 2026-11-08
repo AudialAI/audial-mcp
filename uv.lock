@@ -42,14 +42,17 @@ wheels = [
 
 [[package]]
 name = "audial-mcp"
-version = "0.7.0"
+version = "0.8.0"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },
     { name = "audial-sdk" },
     { name = "mcp" },
     { name = "pydantic" },
+    { name = "requests" },
+    { name = "starlette" },
     { name = "typing-extensions" },
+    { name = "uvicorn" },
 ]
 
 [package.dev-dependencies]
@@ -66,7 +69,10 @@ requires-dist = [
     { name = "audial-sdk", specifier = ">=1.7.0" },
     { name = "mcp", specifier = ">=2.2,<3" },
     { name = "pydantic", specifier = ">=2" },
+    { name = "requests", specifier = ">=2.25" },
+    { name = "starlette", specifier = ">=0.27" },
     { name = "typing-extensions", specifier = ">=4" },
+    { name = "uvicorn", specifier = ">=0.31" },
 ]
 
 [package.metadata.requires-dev]
@@ -1331,8 +1337,8 @@ name = "uvicorn"
 version = "0.54.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "click", marker = "python_full_version < '3.12' or python_full_version >= '3.14' or sys_platform != 'emscripten'" },
-    { name = "h11", marker = "python_full_version < '3.12' or python_full_version >= '3.14' or sys_platform != 'emscripten'" },
+    { name = "click" },
+    { name = "h11" },
     { name = "typing-extensions", marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/da/34/30e9280707135d2cfc589dfff3cb796bd07a3aeb1a3e415ba09dd89d7bb4/uvicorn-0.54.0.tar.gz", hash = "sha256:a2e33cbfaa0306f8e6b0c13e0cb89d7d7a2da3e62b90c66e18c33d9807b28620", size = 112283, upload-time = "2026-09-25T06:52:37.601Z" }

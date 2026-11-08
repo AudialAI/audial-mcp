@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import argparse
 import contextlib
+import copy
 import logging
 import os
 import re
@@ -10,6 +12,7 @@ import sys
 import time
 import webbrowser
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -17,15 +20,19 @@ import anyio
 import audial
 from audial.api import device_login
 from audial.api.constants import STATUS_FUNCTIONS
-from audial.api.exceptions import AudialError
+from audial.api.exceptions import AudialAuthError, AudialError
 from audial.utils import config as sdk_config
 from mcp.server import MCPServer
+from mcp.server.auth.provider import TokenVerifier
 from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.mcpserver.tools import Tool
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, Field
+from starlette.applications import Starlette
 
-from audial_mcp import __version__
+from audial_mcp import BOOT_ENV, __version__
+from audial_mcp import remote as remote_mode
 from audial_mcp.config import (
     SIGN_IN_WAIT_S,
     ConfigError,
@@ -34,9 +41,9 @@ from audial_mcp.config import (
     load_settings,
 )
 from audial_mcp.errors import SignInRequired, to_tool_error
-from audial_mcp.jobs import run_job
+from audial_mcp.jobs import JobTimeout, run_job
 from audial_mcp.progress import ProgressRelay
-from audial_mcp.results import JobResult, inventory, list_jobs, new_job_dir, slugify
+from audial_mcp.results import FileInfo, JobResult, inventory, list_jobs, new_job_dir, slugify
 from audial_mcp.validation import (
     AUDIO_EXTENSIONS,
     JSON_EXTENSIONS,
@@ -112,9 +119,25 @@ _API_FUNCTIONS = frozenset(STATUS_FUNCTIONS.values()) | frozenset(_ADDON_FUNCTIO
 # and the user gets `JobTimeout`'s guidance rather than a bare SDK timeout.
 SDK_WAIT_HEADROOM_S = 60
 
-REMOTE = ToolAnnotations(read_only_hint=False, open_world_hint=True, idempotent_hint=False)
-READ_ONLY_REMOTE = ToolAnnotations(read_only_hint=True, open_world_hint=True)
-LOCAL_READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=False)
+# Every hint is set explicitly: ChatGPT requires readOnlyHint, destructiveHint and openWorldHint
+# as booleans, and an unset destructiveHint means "destructive" to MCP clients. The job tools
+# start work and write new results, but never delete or overwrite the user's data.
+REMOTE = ToolAnnotations(
+    read_only_hint=False, destructive_hint=False, open_world_hint=True, idempotent_hint=False
+)
+READ_ONLY_REMOTE = ToolAnnotations(
+    read_only_hint=True, destructive_hint=False, open_world_hint=True
+)
+LOCAL_READ_ONLY = ToolAnnotations(
+    read_only_hint=True, destructive_hint=False, open_world_hint=False
+)
+# sign_out revokes this computer's key: the one tool that undoes something.
+SIGN_OUT = ToolAnnotations(
+    read_only_hint=False, destructive_hint=True, open_world_hint=True, idempotent_hint=False
+)
+
+# Set when the server runs with --http (see `create_http_app`); None for the stdio server.
+_remote: remote_mode.Remote | None = None
 
 # A plan validates the tool's arguments and returns the job's folder-name slug together with the
 # SDK call to run in it. Tools hand one to `_execute`, which runs it inside the try block so a
@@ -164,11 +187,14 @@ _pending_sign_in_expires = 0.0
 def _secrets() -> tuple[str, ...]:
     """The credential strings in use, longest first so the longer match wins."""
     signed_in = _signed_in or {}
+    access = remote_mode.caller() if _remote is not None else None
     candidates = (
         _settings.api_key,
         _settings.user_id,
         signed_in.get("api_key"),
         signed_in.get("user_id"),
+        access.token if access else None,
+        access.subject if access else None,
     )
     values = {v for v in candidates if v}
     return tuple(sorted(values, key=len, reverse=True))
@@ -191,10 +217,13 @@ def _redact(value: Any) -> Any:
 
 
 def _redact_text(text: str) -> str:
-    """Replace any configured credential appearing inside `text`."""
+    """Replace any configured credential appearing inside `text`.
+
+    In remote mode server paths go too: a result's becomes its download link.
+    """
     for secret in _secrets():
         text = text.replace(secret, REDACTED)
-    return text
+    return _remote.scrub(text) if _remote is not None else text
 
 
 def _tool_error(
@@ -214,6 +243,7 @@ def _tool_error(
         execution_id=execution_id,
         api_key_from_env=bool(_settings.api_key),
         analysis_id=analysis_id,
+        remote=_remote is not None,
     )
     return ToolError(_redact_text(str(error)))
 
@@ -351,7 +381,14 @@ async def _apply_credentials(ctx: Context) -> None:
 
     An API key in the client's config wins. Without one the SDK reads the sign-in saved on this
     machine, which this starts (in the browser) when it does not exist yet. Never logged.
+
+    In remote mode the request's own verified key is the only credential, and the SDK reads it
+    from the request (see `remote.install_sdk_credentials`); nothing is set or signed in here.
     """
+    if _remote is not None:
+        if remote_mode.caller() is None:
+            raise AudialAuthError("This request carries no Audial credentials.")
+        return
     saved = _saved_sign_in()
     if _settings.api_key:
         os.environ["AUDIAL_API_KEY"] = _settings.api_key
@@ -364,6 +401,34 @@ async def _apply_credentials(ctx: Context) -> None:
     os.environ.pop("AUDIAL_USER_ID", None)
     if saved is None:
         await _sign_in(ctx)
+
+
+def _job_result(tool: str, raw: Any, output_dir: Path, elapsed: int) -> tuple[JobResult, str]:
+    """The result a finished job returns, and its one-line summary for the log and progress."""
+    files = inventory(output_dir)
+    shown_dir = str(output_dir)
+    note = ""
+    if _remote is not None:
+        files = [
+            FileInfo(
+                name=f["name"], path=_remote.results.url_for(f["path"]), size_bytes=f["size_bytes"]
+            )
+            for f in files
+        ]
+        shown_dir = _remote.results.url_for(output_dir)
+        hours = max(1, _remote.settings.results_ttl_s // 3600)
+        note = f" Each file's `path` is its download link, valid for {hours} h."
+    summary = f"{tool} finished in {elapsed} s: {len(files)} file(s) in {shown_dir}"
+    advice = _resynth_advice(tool, raw) + _analysis_note(tool, raw)
+    result = JobResult(
+        tool=tool,
+        execution_id=_execution_id(raw),
+        output_dir=shown_dir,
+        files=files,
+        metadata=_metadata(raw),
+        summary=summary + note + advice,
+    )
+    return result, summary
 
 
 async def _execute(
@@ -385,6 +450,8 @@ async def _execute(
     """
     if _startup_error is not None:
         raise ToolError(str(_startup_error))
+    if _remote is not None:
+        return await _execute_remote(ctx, tool, plan, relay or ProgressRelay(), made or {})
     execution_id: str | None = None
     output_dir: Path | None = None
     try:
@@ -402,22 +469,13 @@ async def _execute(
             relay=relay,
         )
         execution_id = _execution_id(raw)
-        files = inventory(output_dir)
         elapsed = int(time.monotonic() - started)
-        summary = f"{tool} finished in {elapsed} s: {len(files)} file(s) in {output_dir}"
+        result, summary = _job_result(tool, raw, output_dir, elapsed)
         log.info("%s", summary)
-        advice = _resynth_advice(tool, raw) + _analysis_note(tool, raw)
         # The job is done; a failed progress notification must not turn it into an error.
         with contextlib.suppress(Exception):
             await ctx.report_progress(elapsed, total=elapsed, message=summary)
-        return JobResult(
-            tool=tool,
-            execution_id=execution_id,
-            output_dir=str(output_dir),
-            files=files,
-            metadata=_metadata(raw),
-            summary=summary + advice,
-        )
+        return result
     except Exception as exc:  # noqa: BLE001 — every failure becomes a ToolError
         if output_dir is not None:
             _discard_if_empty(output_dir)
@@ -429,12 +487,169 @@ async def _execute(
         ) from None
 
 
+# --- remote mode: jobs that outlive the request ----------------------------------------------
+#
+# ChatGPT gives a tool call about a minute, and progress notifications do not extend it, while
+# most Audial jobs take several. So in remote mode a job runs in the background: the call waits
+# up to `wait_s` for it and returns the result if it finished, or else a "running" result with
+# a job_id, which `check_job` takes to wait again.
+
+
+def _pending(job: remote_mode.RemoteJob) -> JobResult:
+    """What a call returns for a job that is still running."""
+    elapsed = int(time.monotonic() - job.started)
+    latest = f" Latest news: {job.relay.lines[-1]}" if job.relay.lines else ""
+    return JobResult(
+        tool=job.tool,
+        execution_id=None,
+        output_dir="",
+        files=[],
+        metadata={"status": "running", "job_id": job.id, "elapsed_s": elapsed},
+        summary=(
+            f"{job.tool} is still running after {elapsed} s (jobs like this can take a few "
+            f"minutes).{latest} Tell the user it is in progress, then call check_job with "
+            f"job_id {job.id} to get the result."
+        ),
+    )
+
+
+async def _await_job(ctx: Context, job: remote_mode.RemoteJob) -> JobResult:
+    """Wait up to the remote wait budget for `job`, then report where it stands."""
+    assert _remote is not None
+    budget_end = time.monotonic() + _remote.settings.wait_s
+    next_beat = time.monotonic() + 5
+    while not job.done.is_set():
+        now = time.monotonic()
+        if now >= budget_end or now >= job.deadline:
+            break
+        await anyio.sleep(0.25)
+        await job.relay.drain(ctx)
+        if now >= next_beat:
+            next_beat = now + 5
+            elapsed = int(now - job.started)
+            with contextlib.suppress(Exception):
+                await ctx.report_progress(elapsed, message=f"{job.tool}: {elapsed} s elapsed")
+    await job.relay.drain(ctx)
+    if not job.done.is_set():
+        if time.monotonic() < job.deadline:
+            return _pending(job)
+        # Past its deadline, but the job may still finish: a later check_job then has it.
+        error: BaseException = JobTimeout(job.tool, time.monotonic() - job.started)
+    elif job.error is not None:
+        error = job.error
+        _discard_if_empty(job.output_dir)
+    else:
+        if job.result is None:
+            elapsed = int((job.finished or time.monotonic()) - job.started)
+            job.result, _summary = _job_result(job.tool, job.raw, job.output_dir, elapsed)
+            # The folder name is the download links' secret: it stays out of the log.
+            count = len(job.result["files"])
+            log.info(
+                "%s: job %s finished in %d s, %d file(s)", job.tool, job.id[:6], elapsed, count
+            )
+        return job.result
+    raise _tool_error(
+        error,
+        tool=job.tool,
+        execution_id=_execution_id(job.raw),
+        analysis_id=job.made.get("analysis_id"),
+    ) from None
+
+
+async def _execute_remote(
+    ctx: Context, tool: str, plan: Plan, relay: ProgressRelay, made: dict[str, str]
+) -> JobResult:
+    """`_execute` for remote mode: fetch the inputs, start the job, wait a while for it."""
+    remote = _remote
+    assert remote is not None
+    inputs = remote.open_inputs()
+    try:
+        try:
+            with remote.use_inputs(inputs):
+                # Downloads happen here, so off the event loop. The slug is unused: a remote
+                # job's folder is named by its id.
+                _slug, call = await anyio.to_thread.run_sync(plan)
+            await _apply_credentials(ctx)
+        except BaseException:
+            remote.close_inputs(inputs)
+            raise
+        owner = remote_mode.caller()
+        output_dir = remote.results.new_job_dir()
+        job = remote.jobs.start(
+            owner=owner.subject if owner else "",
+            tool=tool,
+            output_dir=output_dir,
+            fn=lambda: call(output_dir),
+            relay=relay,
+            made=made,
+            timeout_s=_settings.job_timeout_s,
+            cleanup=lambda: remote.close_inputs(inputs),
+        )
+        log.info("%s: started job %s", tool, job.id[:6])
+        with contextlib.suppress(Exception):
+            await ctx.report_progress(0, message=f"{tool}: starting")
+    except Exception as exc:  # noqa: BLE001 — every failure becomes a ToolError
+        raise _tool_error(exc, tool=tool, analysis_id=made.get("analysis_id")) from None
+    return await _await_job(ctx, job)
+
+
+async def check_job(
+    ctx: Context,
+    job_id: Annotated[
+        str,
+        Field(description="The job_id a tool returned with status 'running'."),
+    ],
+) -> JobResult:
+    """Remote mode only: the result of a job that was still running when its tool returned.
+
+    Waits up to the server's wait budget (`AUDIAL_MCP_WAIT_S`) for the job. Only the account
+    that started a job can check it; for any other, the job does not exist. The description
+    the remote server lists is set in `create_http_app`.
+    """
+    assert _remote is not None
+    owner = remote_mode.caller()
+    job = _remote.jobs.get(job_id, owner.subject if owner else None)
+    if job is None:
+        raise ToolError(
+            "There is no job with that id for this account. Its results may have expired, or "
+            "the server restarted; run the tool again."
+        )
+    return await _await_job(ctx, job)
+
+
 AUDIO_FILE = (
     "Full path to a local audio file (.wav, .mp3, .aif, .aiff, .flac, .m4a, .ogg, .aac). "
     "~ is expanded."
 )
 
-FilePath = Annotated[str, Field(description=AUDIO_FILE)]
+# Every argument that names a file takes this validator. A local client passes a path, which
+# goes through unchanged. ChatGPT passes a file the user attached as an object
+# ({download_url, file_id, mime_type, file_name}), which becomes its download link (see
+# `remote.file_arg`); the advertised schema stays a plain string for the stdio server.
+FileArg = BeforeValidator(remote_mode.file_arg)
+
+# The argument names that hold files, across all tools: remote mode advertises them as file
+# objects (`openai/fileParams`).
+FILE_PARAMS = frozenset(
+    {
+        "file_path",
+        "reference_file",
+        "source_file",
+        "midi_file",
+        "melody_audio_file",
+        "word_timestamps_file",
+    }
+)
+
+
+def _file(value: str, kinds: frozenset[str], label: str) -> Path:
+    """A file argument as a local path: checked on disk (stdio) or downloaded (remote)."""
+    if _remote is None:
+        return check_file(value, kinds, label)
+    return remote_mode.fetch(value, kinds, label)
+
+
+FilePath = Annotated[str, FileArg, Field(description=AUDIO_FILE)]
 
 AnalysisId = Annotated[
     str | None,
@@ -449,6 +664,7 @@ AnalysisId = Annotated[
 
 AnalysisFilePath = Annotated[
     str | None,
+    FileArg,
     Field(
         description=(
             f"{AUDIO_FILE} For a track that has not been analysed yet: segment runs on it "
@@ -479,7 +695,7 @@ def _analysis_source(
             )
         return analysis_id, None
     if file_path:
-        return None, check_file(file_path, AUDIO_EXTENSIONS, "audio file")
+        return None, _file(file_path, AUDIO_EXTENSIONS, "audio file")
     raise ValidationError(
         "Give the analysis_id a segment result returned, or the file_path of a track to "
         "analyse first."
@@ -629,7 +845,7 @@ async def stem_split(
     relay = ProgressRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
-        src = check_file(file_path, AUDIO_EXTENSIONS, "audio file")
+        src = _file(file_path, AUDIO_EXTENSIONS, "audio file")
         return slugify(src.stem), lambda out: audial.stem_split(
             file_path=str(src),
             stems=stems,
@@ -654,7 +870,7 @@ async def analyze(ctx: Context, file_path: FilePath) -> JobResult:
     relay = ProgressRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
-        src = check_file(file_path, AUDIO_EXTENSIONS, "audio file")
+        src = _file(file_path, AUDIO_EXTENSIONS, "audio file")
         return slugify(src.stem), lambda out: audial.analyze(
             file_path=str(src), results_folder=str(out), on_progress=relay.on_progress
         )
@@ -709,7 +925,7 @@ async def segment(
     relay = ProgressRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
-        src = check_file(file_path, AUDIO_EXTENSIONS, "audio file")
+        src = _file(file_path, AUDIO_EXTENSIONS, "audio file")
         return slugify(src.stem), lambda out: _without_alias(
             _segment(src, out, relay, genre=genre, edm=edm, features=features)
         )
@@ -776,6 +992,7 @@ async def master(
     file_path: FilePath,
     reference_file: Annotated[
         str | None,
+        FileArg,
         Field(
             description=(
                 "Optional reference track whose loudness and tone the master should match."
@@ -792,9 +1009,9 @@ async def master(
     relay = ProgressRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
-        src = check_file(file_path, AUDIO_EXTENSIONS, "audio file")
+        src = _file(file_path, AUDIO_EXTENSIONS, "audio file")
         ref = (
-            check_file(reference_file, AUDIO_EXTENSIONS, "reference audio file")
+            _file(reference_file, AUDIO_EXTENSIONS, "reference audio file")
             if reference_file
             else None
         )
@@ -812,7 +1029,7 @@ async def master(
 async def generate_samples(
     ctx: Context,
     file_path: Annotated[
-        str | None, Field(description=f"{AUDIO_FILE} Give this or analysis_id.")
+        str | None, FileArg, Field(description=f"{AUDIO_FILE} Give this or analysis_id.")
     ] = None,
     analysis_id: AnalysisId = None,
     job_type: Annotated[
@@ -877,7 +1094,7 @@ async def generate_midi(
     relay = ProgressRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
-        src = check_file(file_path, AUDIO_EXTENSIONS, "audio file")
+        src = _file(file_path, AUDIO_EXTENSIONS, "audio file")
         return slugify(src.stem), lambda out: audial.generate_midi(
             file_path=str(src),
             bpm=bpm,
@@ -917,10 +1134,12 @@ async def generate_music(
     ] = None,
     source_file: Annotated[
         str | None,
+        FileArg,
         Field(description=("Local audio file; required for remix, lego, understand.")),
     ] = None,
     reference_file: Annotated[
         str | None,
+        FileArg,
         Field(description="Local audio file; required for cover."),
     ] = None,
     bpm: Annotated[int | None, Field(description="Tempo hint in beats per minute.")] = None,
@@ -977,11 +1196,9 @@ async def generate_music(
     relay = ProgressRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
-        src = (
-            check_file(source_file, AUDIO_EXTENSIONS, "source audio file") if source_file else None
-        )
+        src = _file(source_file, AUDIO_EXTENSIONS, "source audio file") if source_file else None
         ref = (
-            check_file(reference_file, AUDIO_EXTENSIONS, "reference audio file")
+            _file(reference_file, AUDIO_EXTENSIONS, "reference audio file")
             if reference_file
             else None
         )
@@ -1019,6 +1236,7 @@ async def sound2vital(
     ctx: Context,
     file_path: Annotated[
         str,
+        FileArg,
         Field(
             description=(
                 f"{RESYNTH_INPUT} The result is an editable Audial Synth (.vital) preset that "
@@ -1035,7 +1253,7 @@ async def sound2vital(
     relay = ProgressRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
-        src = check_file(file_path, AUDIO_EXTENSIONS, "audio file")
+        src = _file(file_path, AUDIO_EXTENSIONS, "audio file")
         return slugify(src.stem), lambda out: audial.sound2vital(
             file_path=str(src),
             results_folder=str(out),
@@ -1051,6 +1269,7 @@ async def sound2serum(
     ctx: Context,
     file_path: Annotated[
         str,
+        FileArg,
         Field(
             description=(
                 f"{RESYNTH_INPUT} The result is an editable Xfer Serum 2 (.SerumPreset) preset "
@@ -1067,7 +1286,7 @@ async def sound2serum(
     relay = ProgressRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
-        src = check_file(file_path, AUDIO_EXTENSIONS, "audio file")
+        src = _file(file_path, AUDIO_EXTENSIONS, "audio file")
         return slugify(src.stem), lambda out: audial.sound2serum(
             file_path=str(src),
             results_folder=str(out),
@@ -1083,6 +1302,7 @@ async def text2vox(
     ctx: Context,
     reference_file: Annotated[
         str,
+        FileArg,
         Field(description="Short clip of the reference voice (timbre)."),
     ],
     lyrics: Annotated[
@@ -1097,14 +1317,17 @@ async def text2vox(
     ],
     midi_file: Annotated[
         str | None,
+        FileArg,
         Field(description="MIDI melody (.mid). Give this or melody_audio_file."),
     ] = None,
     melody_audio_file: Annotated[
         str | None,
+        FileArg,
         Field(description="Audio whose melody is transcribed and followed, if no MIDI."),
     ] = None,
     word_timestamps_file: Annotated[
         str | None,
+        FileArg,
         Field(description="Optional JSON word timings."),
     ] = None,
     lyrics_mode: Annotated[
@@ -1164,15 +1387,15 @@ async def text2vox(
     relay = ProgressRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
-        ref = check_file(reference_file, AUDIO_EXTENSIONS, "reference audio file")
-        mid = check_file(midi_file, MIDI_EXTENSIONS, "MIDI file") if midi_file else None
+        ref = _file(reference_file, AUDIO_EXTENSIONS, "reference audio file")
+        mid = _file(midi_file, MIDI_EXTENSIONS, "MIDI file") if midi_file else None
         mel = (
-            check_file(melody_audio_file, AUDIO_EXTENSIONS, "melody audio file")
+            _file(melody_audio_file, AUDIO_EXTENSIONS, "melody audio file")
             if melody_audio_file
             else None
         )
         wts = (
-            check_file(word_timestamps_file, JSON_EXTENSIONS, "word timestamps JSON file")
+            _file(word_timestamps_file, JSON_EXTENSIONS, "word timestamps JSON file")
             if word_timestamps_file
             else None
         )
@@ -1345,6 +1568,15 @@ API_KEY_CONFIGURED = (
 
 
 def _account() -> Account:
+    if _remote is not None:
+        access = remote_mode.caller()
+        email = (access.claims or {}).get("email") if access else None
+        return Account(
+            signed_in=access is not None,
+            email=email,
+            source="api-key",
+            summary=f"Connected to Audial as {email or 'an Audial account'}.",
+        )
     saved = _saved_sign_in()
     if _settings.api_key:
         return Account(
@@ -1404,7 +1636,7 @@ async def sign_in(
         raise _tool_error(exc, tool="sign_in") from None
 
 
-@mcp.tool(title="Sign out of Audial", annotations=REMOTE)
+@mcp.tool(title="Sign out of Audial", annotations=SIGN_OUT)
 async def sign_out() -> Account:
     """Sign out of Audial on this computer and disconnect it from the account.
 
@@ -1423,10 +1655,202 @@ async def sign_out() -> Account:
         raise _tool_error(exc, tool="sign_out") from None
 
 
-def main() -> None:
+# --- remote mode: the server ChatGPT and other remote clients connect to --------------------
+
+# Tools that only make sense on the user's own computer: the local results folder, and the
+# browser sign-in that saves a key on this machine.
+LOCAL_ONLY_TOOLS = frozenset({"list_results", "sign_in", "sign_out"})
+
+REMOTE_FILE_NOTE = (
+    'A file the user attached to the chat, or {"download_url": "https://...", "file_id": '
+    '"any id"} for a file at a public https link (the link to the file itself).'
+)
+
+
+# Tools whose local description would be wrong for a remote caller.
+REMOTE_DESCRIPTIONS = {
+    "account": (
+        "Show which Audial account this connection uses, by its email. Use when a tool reports "
+        "a credentials problem or the user asks which account is in use."
+    ),
+}
+
+
+def _remote_instructions(settings: remote_mode.RemoteSettings) -> str:
+    hours = max(1, settings.results_ttl_s // 3600)
+    return (
+        "Audial runs hosted audio tools on the user's Audial account. Give each tool its audio "
+        "as a file the user attached to the chat, or as an https link to the file itself. "
+        f"Results come back as download links (each file's `path`), valid for {hours} h: give "
+        "them to the user. A job still running after "
+        f"{settings.wait_s} s returns status 'running' with a job_id: tell the user it is in "
+        "progress, then call check_job with that job_id for the result. "
+        "segment takes about half a minute and returns an analysis_id; audio_features, "
+        "tag_audio, get_lyrics and generate_samples take it to add to that analysis without "
+        "uploading again (given a file, they run segment first). Tags, lyrics and sample packs "
+        "wait a few minutes after a new analysis while its stems are made. Audial's workers "
+        "scale to zero, so the first job after an idle period spends extra time starting one: "
+        "that shows up as a 'Warming up the machine' line, worth relaying as the reason for "
+        "the wait; service_status says in advance which tools are warm. If a tool reports "
+        "that the account's plan does not cover a run, pass that on as it is. "
+        "Only use audio the user has the rights to, and for text2vox a reference voice that is "
+        "the user's own or one they have permission to use. "
+        "sound2vital and sound2serum model one isolated sound: a loop, melody or drum pattern "
+        "gives a poor preset, so say so before running one and suggest trimming it to one "
+        "note. After either tool, relay anything in `summary` about the match."
+    )
+
+
+def _remote_file_schema(description: str) -> dict[str, Any]:
+    """A file argument as ChatGPT attaches it (`openai/fileParams`)."""
+    return {
+        "type": "object",
+        "description": description,
+        "properties": {
+            "download_url": {"type": "string", "description": "https link to the file."},
+            "file_id": {"type": "string", "description": "Id of the attached file."},
+            "mime_type": {"type": "string", "description": "The file's type, if known."},
+            "file_name": {"type": "string", "description": "The file's name, if known."},
+        },
+        "required": ["download_url", "file_id"],
+    }
+
+
+def _remote_description(description: str) -> str:
+    """A file argument's description with the local-path wording replaced."""
+    text = description.replace(AUDIO_FILE, "An audio file (.wav, .mp3, .aif, .flac, .m4a, ...).")
+    text = text.replace("Local audio file", "Audio file")
+    return f"{text} {REMOTE_FILE_NOTE}"
+
+
+def _remote_tool(tool: Tool, settings: remote_mode.RemoteSettings) -> Tool:
+    """A copy of one tool for the remote server: file arguments as file objects, plus `_meta`."""
+    params = copy.deepcopy(tool.parameters)
+    properties = params.get("properties", {})
+    files = sorted(name for name in properties if name in FILE_PARAMS)
+    for name in files:
+        properties[name] = _remote_file_schema(
+            _remote_description(properties[name].get("description", ""))
+        )
+    meta = dict(tool.meta or {})
+    if files:
+        meta["openai/fileParams"] = files
+    if settings.authorization_server:
+        # Every tool needs the user's account (OpenAI reads the `_meta` mirror of this field).
+        meta["securitySchemes"] = [{"type": "oauth2", "scopes": []}]
+    description = REMOTE_DESCRIPTIONS.get(tool.name, tool.description)
+    return tool.model_copy(
+        update={"parameters": params, "meta": meta or None, "description": description}
+    )
+
+
+def create_http_app(
+    settings: remote_mode.RemoteSettings,
+    verifier: TokenVerifier | None = None,
+) -> Starlette:
+    """Switch this process to remote mode and return the ASGI app to serve.
+
+    The remote server is a separate `MCPServer` holding copies of the tools, so the stdio
+    server's own tool list is never changed. The tool functions are shared; they read
+    `_remote` to fetch their inputs, publish their results and run their jobs in the
+    background. The SDK's credential lookups are pointed at the request being served, and a
+    key in this process's environment is ignored: each caller brings their own.
+    """
+    global _remote, _settings
+    if _settings.api_key:
+        log.warning("AUDIAL_API_KEY is ignored with --http: each request brings its own key")
+    for name in ("AUDIAL_API_KEY", "AUDIAL_USER_ID"):
+        os.environ.pop(name, None)
+    if _settings.api_base_url:
+        os.environ["AUDIAL_API_BASE_URL"] = _settings.api_base_url
+    remote = remote_mode.Remote.create(settings)
+    remote.restore_sdk = remote_mode.install_sdk_credentials()
+    remote.saved_settings = _settings
+    _settings = replace(_settings, api_key=None, user_id=None, results_dir=remote.results.root)
+    _remote = remote
+
+    tools = [
+        _remote_tool(tool, settings)
+        for tool in mcp._tool_manager.list_tools()  # noqa: SLF001 (the Tool objects, not wire copies)
+        if tool.name not in LOCAL_ONLY_TOOLS
+    ]
+    server = MCPServer(
+        "audial",
+        instructions=_remote_instructions(settings),
+        version=__version__,
+        tools=tools,
+    )
+    server.add_tool(
+        check_job,
+        title="Check on a running job",
+        description=(
+            "Get the result of a job that was still running when its tool returned. Waits up "
+            f"to {settings.wait_s} s for it to finish; if it is still running, the result says "
+            "so again with the same job_id: tell the user it is in progress and check again. "
+            "Starts nothing and costs nothing."
+        ),
+        annotations=ToolAnnotations(
+            read_only_hint=True, destructive_hint=False, open_world_hint=False, idempotent_hint=True
+        ),
+        meta=(
+            {"securitySchemes": [{"type": "oauth2", "scopes": []}]}
+            if settings.authorization_server
+            else None
+        ),
+    )
+    return remote_mode.build_app(server, remote, verifier or remote_mode.AudialKeyVerifier())
+
+
+def disable_remote() -> None:
+    """Undo `create_http_app` (for tests): the stdio server's state comes back."""
+    global _remote, _settings
+    if _remote is None:
+        return
+    if _remote.restore_sdk is not None:
+        _remote.restore_sdk()
+    if _remote.saved_settings is not None:
+        _settings = _remote.saved_settings
+    _remote = None
+
+
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="audial-mcp",
+        description=(
+            "Audial's audio tools as an MCP server. Without options it speaks MCP over stdio "
+            "to the client that started it."
+        ),
+    )
+    parser.add_argument(
+        "--http",
+        action="store_true",
+        help=(
+            "serve streamable HTTP at /mcp for remote clients instead; each request "
+            "authenticates with its own Audial API key (Authorization: Bearer aud_...)"
+        ),
+    )
+    parser.add_argument("--host", help="address to listen on (default 127.0.0.1)")
+    parser.add_argument("--port", type=int, help="port to listen on (default $PORT or 8000)")
+    parser.add_argument(
+        "--public-url",
+        help="the URL clients reach this server at, for download links (default http://host:port)",
+    )
+    parser.add_argument(
+        "--authorization-server",
+        help="OAuth authorization server that issues Audial keys, published as RFC 9728 metadata",
+    )
+    args, unknown = parser.parse_known_args(argv)
+    if unknown:
+        # Arguments used to be ignored entirely; a client config that passes some keeps working.
+        log.warning("ignoring unknown arguments: %s", " ".join(unknown))
+    return args
+
+
+def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(
         level=logging.INFO, stream=sys.stderr, format="%(levelname)s %(name)s: %(message)s"
     )
+    args = _parse_args(argv)
     global _settings, _startup_error
     try:
         _settings = load_settings()
@@ -1434,6 +1858,9 @@ def main() -> None:
     except ConfigError as exc:
         _settings = fallback_settings()
         _startup_error = exc
+    if args.http:
+        _serve_http(args)
+        return
     log.info(
         "audial-mcp %s; results dir %s; credentials %s",
         __version__,
@@ -1444,6 +1871,27 @@ def main() -> None:
         # Serve anyway: the client sees a working server whose tools all explain this.
         log.error("configuration error; every tool call will return it: %s", _startup_error)
     mcp.run()  # stdio
+
+
+def _serve_http(args: argparse.Namespace) -> None:
+    import uvicorn
+
+    try:
+        settings = remote_mode.remote_settings(
+            host=args.host,
+            port=args.port,
+            public_url=args.public_url,
+            authorization_server=args.authorization_server,
+            env=BOOT_ENV,
+        )
+    except ValueError as exc:
+        log.error("%s", exc)
+        raise SystemExit(2) from None
+    if _startup_error is not None:
+        log.error("configuration error; every tool call will return it: %s", _startup_error)
+    app = create_http_app(settings)
+    log.info("audial-mcp %s over streamable HTTP: %s", __version__, remote_mode.describe(settings))
+    uvicorn.run(app, host=settings.host, port=settings.port, log_level="info")
 
 
 if __name__ == "__main__":

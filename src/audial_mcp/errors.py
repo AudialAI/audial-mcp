@@ -83,6 +83,18 @@ def _reuse(tool: str, analysis_id: str) -> str:
     )
 
 
+# Remote mode words a refusal without urging a purchase: apps in ChatGPT must not "promote
+# upgrades" or initiate subscriptions, though they may say what an account's plan covers.
+REMOTE_SUBSCRIPTION_REQUIRED = (
+    "The Audial account connected here does not cover this run: it needs an active Audial "
+    "subscription, or the account's free runs are used up."
+)
+REMOTE_AUTH_REJECTED = (
+    "Audial did not accept the credentials this connection uses. Reconnect Audial (or check "
+    "the API key) and try again."
+)
+
+
 def to_tool_error(
     exc: BaseException,
     *,
@@ -90,8 +102,17 @@ def to_tool_error(
     execution_id: str | None = None,
     api_key_from_env: bool = False,
     analysis_id: str | None = None,
+    remote: bool = False,
 ) -> ToolError:
-    """`analysis_id` is set when the tool analysed a file before the step that failed."""
+    """`analysis_id` is set when the tool analysed a file before the step that failed.
+
+    `remote`: the server is serving remote callers (`--http`), whose credentials come with
+    each request and who have no local configuration or browser sign-in to fix.
+    """
+    if remote and isinstance(exc, SubscriptionRequiredError):
+        return ToolError(REMOTE_SUBSCRIPTION_REQUIRED)
+    if remote and isinstance(exc, AudialAuthError):
+        return ToolError(REMOTE_AUTH_REJECTED)
     if isinstance(exc, AudialValidationError):
         # Input Audial will not accept, with the place it went wrong: per-note
         # lyrics carry the 1-based note the message is about, and the model
