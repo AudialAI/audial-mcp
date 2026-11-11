@@ -323,6 +323,65 @@ async def test_a_weak_preset_says_why(client, wav, monkeypatch, tool):
     assert "usual cause" not in summary
 
 
+WRITTEN_LYRICS = "[Verse]\nNeon rain on the window\n\n[Chorus]\nWe run tonight"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "returns",
+    [
+        # SDK 1.7.1 and later: the run's generation metadata under `metadata`.
+        {
+            "execution": {"exeId": "-P3a"},
+            "metadata": {"written_lyrics": WRITTEN_LYRICS, "audio_seconds": [61.4]},
+        },
+        # Earlier SDKs: only the execution record carries it.
+        {
+            "execution": {
+                "exeId": "-P3a",
+                "generation_metadata": {"written_lyrics": WRITTEN_LYRICS, "audio_seconds": [61.4]},
+            }
+        },
+    ],
+)
+async def test_written_lyrics_reach_the_model(client, settings, monkeypatch, returns):
+    fake_sdk(monkeypatch, "generate_music", produce=("song.mp3",), returns=returns)
+    result = await client.call_tool("generate_music", {"prompt": "dreamy synth pop"})
+    summary = result.structured_content["summary"]
+    assert "Audial wrote these lyrics from the prompt" in summary
+    assert WRITTEN_LYRICS in summary
+    assert "run generate_music again with `lyrics`" in summary
+    assert "Length: 61 s." in summary
+
+
+@pytest.mark.anyio
+async def test_music_with_the_users_lyrics_gets_only_its_length(client, settings, monkeypatch):
+    fake_sdk(
+        monkeypatch,
+        "generate_music",
+        produce=("a.mp3", "b.mp3"),
+        returns={"execution": {"exeId": "-P3b"}, "metadata": {"audio_seconds": [30.2, 29.6]}},
+    )
+    result = await client.call_tool(
+        "generate_music", {"prompt": "lofi", "lyrics": "[Verse]\nmine", "batch_size": 2}
+    )
+    summary = result.structured_content["summary"]
+    assert "wrote these lyrics" not in summary
+    assert "Lengths: 30 s, 30 s." in summary
+
+
+@pytest.mark.anyio
+async def test_music_tool_says_what_leaving_out_lyrics_does(client):
+    tools = {t.name: t for t in (await client.list_tools()).tools}
+    props = tools["generate_music"].input_schema["properties"]
+    assert "Audial writes lyrics from the prompt" in props["lyrics"]["description"]
+    assert "instrumental=true" in props["lyrics"]["description"]
+    assert "Omit for instrumental" not in props["lyrics"]["description"]
+    assert "360" in props["audio_duration"]["description"]
+    assert "600" not in props["audio_duration"]["description"]
+    assert "show them to the user" in tools["generate_music"].description
+
+
 @pytest.mark.anyio
 async def test_a_weak_preset_with_no_warning_still_gets_the_advice(client, wav, monkeypatch):
     fake_sdk(
