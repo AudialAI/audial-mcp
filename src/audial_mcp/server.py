@@ -276,6 +276,35 @@ def _resynth_advice(tool: str, raw: Any) -> str:
     return "".join(f" {note}" for note in notes)
 
 
+def _music_note(tool: str, raw: Any) -> str:
+    """Lyrics Audial wrote for a song and each file's length, said in the summary.
+
+    Newer SDKs return the run's generation metadata as `metadata`; with older ones it is only
+    in the execution record.
+    """
+    if tool != "generate_music" or not isinstance(raw, dict):
+        return ""
+    meta = raw.get("metadata")
+    if not isinstance(meta, dict) or not meta:
+        execution = raw.get("execution")
+        meta = execution.get("generation_metadata") if isinstance(execution, dict) else None
+    if not isinstance(meta, dict):
+        return ""
+    note = ""
+    seconds = [s for s in meta.get("audio_seconds") or [] if isinstance(s, (int, float))]
+    if seconds:
+        label = "Length" if len(seconds) == 1 else "Lengths"
+        note += f" {label}: {', '.join(f'{round(s)} s' for s in seconds)}."
+    written = meta.get("written_lyrics")
+    if isinstance(written, str) and written.strip():
+        note += (
+            " No lyrics were given, so Audial wrote these lyrics from the prompt. Show them to "
+            "the user, who can edit them and run generate_music again with `lyrics`:\n"
+            f"{written.strip()}"
+        )
+    return note
+
+
 ADDON_TOOLS = ("audio_features", "tag_audio", "get_lyrics", "generate_samples")
 
 
@@ -419,7 +448,7 @@ def _job_result(tool: str, raw: Any, output_dir: Path, elapsed: int) -> tuple[Jo
         hours = max(1, _remote.settings.results_ttl_s // 3600)
         note = f" Each file's `path` is its download link, valid for {hours} h."
     summary = f"{tool} finished in {elapsed} s: {len(files)} file(s) in {shown_dir}"
-    advice = _resynth_advice(tool, raw) + _analysis_note(tool, raw)
+    advice = _resynth_advice(tool, raw) + _analysis_note(tool, raw) + _music_note(tool, raw)
     result = JobResult(
         tool=tool,
         execution_id=_execution_id(raw),
@@ -1127,8 +1156,9 @@ async def generate_music(
         str | None,
         Field(
             description=(
-                "Lyrics with optional section tags like [Verse] and [Chorus]. Omit for "
-                "instrumental."
+                "Lyrics with optional section tags like [Verse] and [Chorus]. Omit them and, "
+                "for text2music, Audial writes lyrics from the prompt and sings them (they come "
+                "back in the result). For no vocals, set instrumental=true."
             )
         ),
     ] = None,
@@ -1147,7 +1177,12 @@ async def generate_music(
     time_signature: Annotated[str | None, Field(description="e.g. '4/4'.")] = None,
     audio_duration: Annotated[
         float | None,
-        Field(description="Length in seconds (10-600)."),
+        Field(
+            description=(
+                "Length in seconds, up to 360 (longer is capped). text2music ends close to it. "
+                "Omitted: the length follows the lyrics, and a cover follows its reference."
+            )
+        ),
     ] = None,
     vocal_language: Annotated[
         str,
@@ -1191,7 +1226,8 @@ async def generate_music(
     Text to music, covers, remixes, lego (re-render with one track emphasised),
     or analysis (understand). Use for new or transformed music, not to edit an existing mix:
     that is master or stem_split. Takes a few minutes and counts as one run, and audio goes to
-    a new results folder.
+    a new results folder. When Audial wrote the lyrics, the summary has them:
+    show them to the user, who can edit them and run again with `lyrics`.
     """
     relay = ProgressRelay()
 
