@@ -58,6 +58,7 @@ TOOLS = {
     "text2vox",
     "pipeline_status",
     "service_status",
+    "usage",
     "list_results",
     "account",
     "sign_in",
