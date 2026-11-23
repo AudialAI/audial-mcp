@@ -527,3 +527,44 @@ async def test_service_status_turns_an_sdk_error_into_a_readable_one(client, set
     result = await client.call_tool("service_status", {})
     assert result.is_error
     assert "UPSTREAM_UNAVAILABLE" in result.content[0].text
+
+
+# usage and the monthly API limit
+
+API_BLOCK = {
+    "plan": "creator",
+    "monthlyLimit": 100,
+    "used": 42,
+    "remaining": 58,
+    "topupRemaining": 0,
+    "resetsAt": 1798000000000,
+}
+
+
+@pytest.mark.anyio
+async def test_usage_returns_the_sdk_block(client, settings, monkeypatch):
+    monkeypatch.setattr(server_mod.audial, "usage", lambda *a, **k: API_BLOCK, raising=False)
+    result = await client.call_tool("usage", {})
+    assert not result.is_error, result.content[0].text
+    assert result.structured_content == API_BLOCK
+
+
+@pytest.mark.anyio
+async def test_usage_without_a_block_says_so(client, settings, monkeypatch):
+    monkeypatch.setattr(server_mod.audial, "usage", lambda *a, **k: None, raising=False)
+    result = await client.call_tool("usage", {})
+    assert not result.is_error
+    assert result.structured_content["usage"] is None
+
+
+@pytest.mark.anyio
+async def test_a_tool_that_hits_the_limit_returns_a_tool_error(client, settings, monkeypatch):
+    from audial.api.exceptions import AudialLimitReached
+
+    def refuse(*args, **kwargs):
+        raise AudialLimitReached.from_body({"limit": 100, "used": 100, "resetsAt": 1798000000000})
+
+    monkeypatch.setattr(server_mod.audial, "usage", refuse, raising=False)
+    result = await client.call_tool("usage", {})
+    assert result.is_error
+    assert "Monthly API limit reached (100/100)" in result.content[0].text

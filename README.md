@@ -75,6 +75,7 @@ page. A key set this way takes priority over a saved sign-in.
 | `text2vox` | Lyrics + reference voice → sung vocal and MIDI |
 | `pipeline_status` | Look up a pipeline by id: its state, each step, and the outputs so far |
 | `service_status` | Which tools have a worker awake right now, and what a cold start will cost |
+| `usage` | This month's API usage: plan, limit, calls used and left, reset time |
 | `list_results` | Browse previous results in your results folder |
 
 ## Analysis and add-ons
@@ -170,7 +171,7 @@ Two other files are *read* if they exist, because the Audial SDK looks for them:
 Credentials from your MCP client's config always win: `audial-mcp` snapshots its environment
 before the SDK loads either file, so neither can redirect your credentials or the API host.
 
-Every tool except `list_results` calls the Audial API, which requires an active Audial subscription on the account; without one the tool returns the API's subscription message.
+Every tool except `list_results` calls the Audial API, which requires an active Audial subscription on the account; without one the tool returns the API's subscription message. When the month's API calls are used up, the tool says so, with the reset date, and does not retry; `usage` shows what is left.
 
 ## Configuration
 

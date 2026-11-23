@@ -1535,6 +1535,26 @@ async def service_status(
         raise _tool_error(exc, tool="service_status") from None
 
 
+@mcp.tool(title="API usage", annotations=READ_ONLY_REMOTE)
+async def usage(ctx: Context) -> dict[str, Any]:
+    """This month's Audial API usage: plan, monthly limit, calls used and left, and the reset time.
+
+    `resetsAt` is milliseconds since the epoch (null before the first call this period). When
+    `remaining` is 0 and `topupRemaining` is 0, further calls are refused until the reset.
+    Reading this does not count as a call.
+    """
+    if _startup_error is not None:
+        raise ToolError(str(_startup_error))
+    try:
+        await _apply_credentials(ctx)
+        block = await anyio.to_thread.run_sync(audial.usage)
+        if not isinstance(block, dict):
+            return {"usage": None, "notice": "Audial reported no API usage for this account."}
+        return _redact(block)
+    except Exception as exc:  # noqa: BLE001 — every failure becomes a ToolError
+        raise _tool_error(exc, tool="usage") from None
+
+
 # Pipeline ids are Firebase push keys; the id is interpolated into the request path, so it is
 # checked before it leaves here rather than trusted because the model supplied it.
 _PIPELINE_ID_RE = _ID_RE

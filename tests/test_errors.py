@@ -82,3 +82,30 @@ def test_the_apis_lyrics_invalid_message_survives():
         tool="text2vox",
     )
     assert "9 tokens for 10 notes" in str(err) and "position 10" in str(err)
+
+
+def test_limit_reached_says_when_it_resets_and_not_to_retry():
+    from audial.api.exceptions import AudialLimitReached
+
+    exc = AudialLimitReached.from_body(
+        {
+            "limit": 100,
+            "used": 100,
+            "resetsAt": 1798000000000,
+            "upgradeUrl": "https://audialmusic.ai/product/pricing",
+        }
+    )
+    text = str(to_tool_error(exc, tool="stem_split"))
+    assert "Monthly API limit reached (100/100)" in text
+    assert "https://audialmusic.ai/product/pricing" in text
+    assert "will not help" in text
+
+
+def test_limit_reached_in_remote_mode_has_no_upgrade_link():
+    from audial.api.exceptions import AudialLimitReached
+
+    exc = AudialLimitReached.from_body(
+        {"limit": 100, "used": 100, "upgradeUrl": "https://audialmusic.ai/product/pricing"}
+    )
+    text = str(to_tool_error(exc, tool="stem_split", remote=True))
+    assert "limit reached" in text and "audialmusic.ai" not in text

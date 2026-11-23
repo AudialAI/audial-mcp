@@ -7,6 +7,7 @@ import logging
 from audial.api.exceptions import (
     AudialAuthError,
     AudialError,
+    AudialLimitReached,
     AudialValidationError,
     SubscriptionRequiredError,
 )
@@ -113,6 +114,14 @@ def to_tool_error(
         return ToolError(REMOTE_SUBSCRIPTION_REQUIRED)
     if remote and isinstance(exc, AudialAuthError):
         return ToolError(REMOTE_AUTH_REJECTED)
+    if isinstance(exc, AudialLimitReached):
+        # The month's API calls are used up: final until the reset, so say so and don't
+        # suggest trying again. Remote mode leaves out the upgrade link (see above).
+        if remote:
+            exc = AudialLimitReached(
+                limit=exc.limit, used=exc.used, resets_at=exc.resets_at, upgrade_url=None
+            )
+        return ToolError(f"{exc} Retrying now will not help.")
     if isinstance(exc, AudialValidationError):
         # Input Audial will not accept, with the place it went wrong: per-note
         # lyrics carry the 1-based note the message is about, and the model

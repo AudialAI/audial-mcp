@@ -33,6 +33,7 @@ TOOLS = {
     "text2vox",
     "pipeline_status",
     "service_status",
+    "usage",
     "list_results",
     "account",
     "sign_in",
@@ -97,7 +98,7 @@ CLIENT_DESCRIPTION_LIMIT = 2048
 async def test_tool_list(client):
     tools = (await client.list_tools()).tools
     assert {t.name for t in tools} == TOOLS
-    assert len(tools) == len(TOOLS) == 19
+    assert len(tools) == len(TOOLS) == 20
     for tool in tools:
         assert len(tool.description) < CLIENT_DESCRIPTION_LIMIT, tool.name
     assert len(server_mod.INSTRUCTIONS) < CLIENT_DESCRIPTION_LIMIT
