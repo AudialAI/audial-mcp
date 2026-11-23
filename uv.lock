@@ -42,7 +42,7 @@ wheels = [
 
 [[package]]
 name = "audial-mcp"
-version = "0.8.1"
+version = "0.9.0"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },
@@ -66,7 +66,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "anyio", specifier = ">=4" },
-    { name = "audial-sdk", specifier = ">=1.7.0" },
+    { name = "audial-sdk", specifier = ">=1.8.0" },
     { name = "mcp", specifier = ">=2.2,<3" },
     { name = "pydantic", specifier = ">=2" },
     { name = "requests", specifier = ">=2.25" },
@@ -85,7 +85,7 @@ dev = [
 
 [[package]]
 name = "audial-sdk"
-version = "1.7.0"
+version = "1.8.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -93,9 +93,9 @@ dependencies = [
     { name = "requests" },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/80/92/f44600261854a88b9bee2f470939ff3c85c17a108c6b1e93a1b05e34d246/audial_sdk-1.7.0.tar.gz", hash = "sha256:6e89870b01187bf3c82f43fe4bd745a4fd2355360ba82cd06f14c31561f51054", size = 142285, upload-time = "2026-11-06T20:40:48.958Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/87/43/ddbf2f8ac7da446bb3f34c4430d6a99db8430b2aa95b327d723a030fb6e7/audial_sdk-1.8.0.tar.gz", hash = "sha256:23d68eb27b4dee3ee00ecc254b0ff27b989ad9aed557acfd069b9e16b0e9a664", size = 147782, upload-time = "2026-11-23T16:03:35.221Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d9/bd/9472503dfe7fedc1b7802a8686d11f47988fc4164b5a52a3975bc082cc33/audial_sdk-1.7.0-py3-none-any.whl", hash = "sha256:fef8f5795f61e51d8fb449c73b71dd04581fb67da44d21b7ad7bd6707c6632b0", size = 113533, upload-time = "2026-11-06T20:40:47.782Z" },
+    { url = "https://files.pythonhosted.org/packages/f0/de/93066c7bf5d4494a0d8648657c25367a969d1e36a01dc6a2ae9b6399ff10/audial_sdk-1.8.0-py3-none-any.whl", hash = "sha256:d563ae412ee50602d707d428fb05cc71607a99b3f808221c882d90c0ac1848b5", size = 116792, upload-time = "2026-11-23T16:03:33.781Z" },
 ]
 
 [[package]]
