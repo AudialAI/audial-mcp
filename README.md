@@ -62,10 +62,10 @@ page. A key set this way takes priority over a saved sign-in.
 |---|---|
 | `stem_split` | Split a track into vocals, drums, bass, other (optionally retime / rekey) |
 | `analyze` | BPM, key and other characteristics |
-| `segment` | Song sections, tempo and bars from the mix, in about half a minute; returns an `analysis_id` |
-| `audio_features` | Energy, danceability, loudness, mode, key and tatum, for the song and each section |
-| `tag_audio` | Genre, moods, instruments and artist tags for the mix and each part, plus a written description |
-| `get_lyrics` | Lyrics as timed lines (word timings in the saved file) |
+| `segment` | Song sections, tempo, bars and key from the mix, in about half a minute; returns an `analysis_id` |
+| `audio_features` | Energy, danceability and loudness for the song and each section, plus the key, mode and tatum |
+| `tag_audio` | Genres, instruments and moods for the mix and each part, plus a written description |
+| `get_lyrics` | Lyrics as timed lines, and when the vocal starts (word timings in the saved file) |
 | `master` | Mastering, optionally matched to a reference |
 | `generate_samples` | Sample pack from an analysis, or from a file in one call |
 | `generate_midi` | Audio to MIDI |
@@ -80,16 +80,24 @@ page. A key set this way takes priority over a saved sign-in.
 
 ## Analysis and add-ons
 
-`segment` analyses the mix in about half a minute: no stems needed. It returns the sections
-(with their phrases) and a tempo map, plus an `analysis_id`. Beats and bars aren't listed one by
-one: `grid` describes them -- where each constant-tempo piece starts, its BPM, and its bar and
-beat. Every beat time is `start + k × 60 / bpm`. Most tracks have one piece.
+`segment` analyses the mix in about half a minute: no stems needed. It returns the analysis in
+Audial's analysis format 5 (`metadata.analysis`, the same object the website's JSON button
+saves): the BPM, time signature, key and Camelot key, the sections (label, start, end, first bar,
+bar count and drum fills), the lead-in before bar 1 and a tempo map, plus an `analysis_id`.
+Every time is in seconds. Beats and bars aren't listed one by one: `grid` describes them --
+where each constant-tempo piece starts, its BPM, and its bar and beat. Every beat time is
+`start + k × 60 / bpm`. Most tracks have one piece.
 
 Pass the `analysis_id` to `audio_features`, `tag_audio`, `get_lyrics` or `generate_samples` to
 add that result to the analysis, whenever you like. Nothing is uploaded again. Each of them also
 takes a `file_path` instead, and then runs `segment` on it first.
 
-- Audio features need nothing more, so they can run straight after the analysis.
+- Audio features need nothing more, so they can run straight after the analysis. They return
+  `key`, `camelot`, `features` (energy, danceability, loudness_lufs, mode, mode_confidence,
+  tatum) and each section's energy, danceability and loudness.
+- `tag_audio` returns `genres`, `instruments`, `moods`, `stems` (each part's instruments and
+  moods, or `{"silent": true}`) and `description`; `get_lyrics` returns `vocal_start` and
+  timed `lines`. These are the same blocks the analysis holds once each add-on has run.
 - Tags, lyrics and the sample pack read the track's stems. Audial makes them automatically
   after each analysis, so right after a new one these tools wait a few minutes for them.
 - If a tool analysed a file and the next step failed or timed out, the error gives the new
@@ -162,9 +170,8 @@ over HTTPS and processed on Audial's servers; results are downloaded into
 
 A tool given an `analysis_id` uploads nothing: it works on the audio Audial already has for
 that analysis. Audial makes and keeps the track's stems with each analysis, like your
-other results. To fill in artist tags, `tag_audio` has Audial's servers look up the track's
-title and artist in a public music database; that lookup gets the title and artist, never the
-audio.
+other results. To tag a track, `tag_audio` has Audial's servers look up the track's title and
+artist in a public music database; that lookup gets the title and artist, never the audio.
 
 Two other files are *read* if they exist, because the Audial SDK looks for them:
 `~/.audial/.audial_config.json` and a `.env` in the directory the server was started from.
