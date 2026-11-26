@@ -453,7 +453,7 @@ async def test_manifest_matches_server(client):
 async def test_tag_audio_description(client):
     tool = next(t for t in (await client.list_tools()).tools if t.name == "tag_audio")
     assert tool.description.splitlines()[0] == (
-        "Tag a track: genre, moods, instruments and artist tags for the mix and each part, "
+        "Tag a track: genres, instruments and moods for the mix and each part, "
         "plus a written description."
     )
     assert "---" not in tool.description

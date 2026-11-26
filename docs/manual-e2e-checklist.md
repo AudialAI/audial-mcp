@@ -138,6 +138,9 @@ deleted after the run, see "Cleanup" at the bottom).
 
 ## 0.6.0: the analysis and its add-ons — not yet run
 
+The expected results below are those of 0.10.0 (audial-sdk 2.0.0, analysis format 5), which
+needs an API that serves the merged view in format 5.
+
 Run against the dev API once it serves the analysis add-ons, with audial-sdk 1.6.0 installed,
 in Claude Desktop with the 0.6.0 bundle (`scripts/build_mcpb.sh`), and repeat 11–13 in Claude
 Code. Use `song30s.wav` (has vocals) and an instrumental clip. Record execution ids as above.
@@ -145,20 +148,26 @@ Code. Use `song30s.wav` (has vocals) and an instrumental clip. Record execution 
 - [ ] **11. `list_tools`**: 19 tools (`segment`, `audio_features`, `tag_audio`, `get_lyrics`
   among them), every parameter documented.
 - [ ] **12. `segment`** on `song30s.wav`: finishes in about half a minute warm (note the cold
-  time too). `metadata` has `analysis_id`, `audio_segmentation.grid` and `sections`, and no
-  `beat_times`; the summary names the `analysis_id`. One `analysis.json` in the job folder.
+  time too). `metadata` has `analysis_id` and `analysis` (format 5: `format_version` 5,
+  `key`, `camelot`, `structure`, `grid` and `sections`), and no `beat_times`, `phrases` or
+  `audio_segmentation`; the summary names the `analysis_id`. One `analysis.json` in the job
+  folder, holding the format 5 object itself.
   The allowance (`GET /functions/allowance`) drops by one.
-- [ ] **13. `audio_features`** with that `analysis_id`: `metadata.song` has energy,
-  danceability, loudness, mode, key; `metadata.sections` one entry per section, and the values
-  differ between sections. `features.json` in the job folder. The allowance does not change.
+- [ ] **13. `audio_features`** with that `analysis_id`: `metadata.key` and `metadata.camelot`
+  are set; `metadata.features` has energy, danceability, loudness_lufs, mode, mode_confidence,
+  tatum; `metadata.sections` one entry per section (energy, danceability, loudness_lufs), and
+  the values differ between sections. `features.json` in the job folder. The allowance does not
+  change.
 - [ ] **14. `tag_audio`** with a `file_path` (a track not yet analysed): runs `segment`
-  first, then waits for the stems ("Preparing the track…" in the logs) and returns `genre`
-  and `song_tags`. Two files: `analysis.json` and `tags.json`. The allowance drops by one,
+  first, then waits for the stems ("Preparing the track…" in the logs) and returns `genres`,
+  `instruments`, `moods`, `stems` and `description` (no artist tags). Two files:
+  `analysis.json` and `tags.json`. The allowance drops by one,
   not two.
 - [ ] **15. `get_lyrics`** with the `analysis_id` from 12: `metadata.lines` are timed lines
-  (`start`, `end`, `text`) that match the song; `lyrics.json` holds the word timings. A
+  (`start`, `end`, `text`) that match the song, and `metadata.vocal_start` is set;
+  `lyrics.json` holds the word timings. A
   second call returns the same result at once (no new run).
-- [ ] **16. `get_lyrics`** on the instrumental: `is_instrumental` true, no lines, and the
+- [ ] **16. `get_lyrics`** on the instrumental: `vocal_start` null, no lines, and the
   summary says "No vocals in this track."
 - [ ] **17. `generate_samples`** with the `analysis_id` from 12: samples in the job folder, no
   new analysis, and the allowance does not change.
