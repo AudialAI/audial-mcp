@@ -1,8 +1,8 @@
 """The analysis and what is added to it: segment, audio_features, tag_audio, get_lyrics, and
 generate_samples on an analysis.
 
-The Audial SDK is mocked throughout, its 1.6 analysis functions included; nothing here talks to
-the service.
+The Audial SDK is mocked throughout, its 2.0 analysis functions included (analysis format 5);
+nothing here talks to the service.
 """
 
 import dataclasses
@@ -20,32 +20,52 @@ from audial_mcp.config import Settings
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# What audial.segment() returns from SDK 2.0: the analysis (format 5) under `analysis`.
 ANALYSIS = {
-    "audio_segmentation": {
-        "format_version": 4,
+    "analysis_id": "-PaNew",
+    "analysis": {
+        "format_version": 5,
+        "duration": 62.42,
         "bpm": 124.0,
+        "tempo_mode": "constant",
+        "time_signature": "4/4",
+        "key": "Amin",
+        "camelot": "8A",
+        "structure": "dance",
+        "bar1": 0.48,
         "grid": {
-            "beats_per_bar": 4,
             "beat_count": 400,
             "bar_count": 100,
+            "max_error_ms": 12.0,
             "pieces": [{"start": 0.48, "bpm": 124.0, "bar": 1, "beat": 1, "count": 400}],
         },
+        "lead_in": None,
         "sections": [
-            {"label": "INTRO", "start": 0.48, "end": 31.45},
-            {"label": "CHORUS", "start": 31.45, "end": 62.42},
+            {
+                "label": "INTRO",
+                "start": 0.48,
+                "end": 31.45,
+                "start_bar": 1,
+                "bars": 16,
+                "fills": [],
+            },
+            {
+                "label": "CHORUS",
+                "start": 31.45,
+                "end": 62.42,
+                "start_bar": 17,
+                "bars": 16,
+                "fills": [60.5],
+            },
         ],
     },
-    "analysis_id": "-PaNew",
+    "execution": {"exeId": "-PaNew", "state": "completed"},
 }
-# segment() also returns the analysis under its 1.5 name, `segmentation`: the same object.
-ANALYSIS["segmentation"] = ANALYSIS["audio_segmentation"]
-ANALYSIS["execution"] = {"exeId": "-PaNew", "state": "completed"}
 SEGMENT_FILE = "demo.wav_segmentation/analysis.json"
 
+# audial.lyrics(): the analysis's `lyrics` block, plus the run's warnings.
 LYRICS = {
-    "lyrics": "Hold me close tonight",
-    "is_instrumental": False,
-    "segments": [{"text": "Hold me close", "start": 12.3, "end": 14.1}],
+    "vocal_start": 12.3,
     "lines": [
         {
             "start": 12.3,
@@ -54,24 +74,44 @@ LYRICS = {
         },
         {"start": 15.0, "end": 16.2, "words": [["tonight", 15.0, 16.2]]},
     ],
-    "section_lyrics": ["", "Hold me close tonight"],
-    "first_vocal_beat_time": 12.3,
+    "warnings": [],
 }
 
+# audial.audio_features(): key, camelot, the `features` block and each section's numbers.
 FEATURES = {
-    "features_version": 2,
-    "song": {"key": "A minor", "loudness": -7.9, "energy": 0.71, "danceability": 0.64},
-    "sections": [{"index": 0, "label": "INTRO", "energy": 0.42}],
+    "key": "Amin",
+    "camelot": "8A",
+    "features": {
+        "energy": 0.71,
+        "danceability": 0.64,
+        "loudness_lufs": -7.9,
+        "mode": "Natural Minor",
+        "mode_confidence": 0.8,
+        "tatum": "1/16",
+    },
+    "sections": [
+        {
+            "label": "INTRO",
+            "start": 0.48,
+            "end": 31.45,
+            "energy": 0.42,
+            "danceability": 0.6,
+            "loudness_lufs": -11.2,
+        }
+    ],
+    "warnings": [],
 }
 
+# audial.tags(): the `tags` block and `description`, plus the run's warnings.
 TAGS = {
-    "genre": ["UK Garage"],
-    "song_tags": {
-        "full": {"moods": ["dark"], "instruments": ["synth"], "artist_tags": ["uk garage"]},
-        "drums": {"moods": ["driving"], "instruments": ["kick"], "silent": False},
-        "bass": {"moods": ["deep"], "instruments": ["sub bass"], "silent": False},
-        "melody": {"moods": ["warm"], "instruments": ["electric piano"], "silent": False},
-        "vocals": {"moods": [], "instruments": [], "silent": True},
+    "genres": ["UK Garage"],
+    "instruments": ["synth"],
+    "moods": ["dark"],
+    "stems": {
+        "drums": {"instruments": ["kick"], "moods": ["driving"]},
+        "bass": {"instruments": ["sub bass"], "moods": ["deep"]},
+        "melody": {"instruments": ["electric piano"], "moods": ["warm"]},
+        "vocals": {"silent": True},
     },
     "description": "A driving UK garage cut built on a swung two-step groove.",
     "warnings": [],
@@ -185,9 +225,11 @@ async def test_segment_is_one_analysis_of_the_mix_and_returns_its_id(client, wav
     assert data["execution_id"] == "-PaNew"
     meta = data["metadata"]
     assert meta["analysis_id"] == "-PaNew"
-    assert meta["audio_segmentation"]["grid"]["pieces"][0]["bpm"] == 124.0
-    # The 1.5 name for the same analysis is not sent twice.
-    assert "segmentation" not in meta
+    # The analysis comes through as the SDK returned it: format 5, under `analysis`.
+    assert meta["analysis"] == ANALYSIS["analysis"]
+    assert meta["analysis"]["grid"]["pieces"][0]["bpm"] == 124.0
+    assert meta["analysis"]["key"] == "Amin" and meta["analysis"]["structure"] == "dance"
+    assert "audio_segmentation" not in meta and "segmentation" not in meta
     assert "analysis_id: -PaNew" in data["summary"]
     for tool in ("audio_features", "tag_audio", "get_lyrics", "generate_samples"):
         assert tool in data["summary"]
@@ -240,9 +282,8 @@ async def test_get_lyrics_from_file(client, settings, wav, sdk):
         {"start": 12.3, "end": 14.1, "text": "Hold me close"},
         {"start": 15.0, "end": 16.2, "text": "tonight"},
     ]
-    assert meta["lyrics"] == "Hold me close tonight" and meta["analysis_id"] == "-PaNew"
-    assert meta["section_lyrics"] == ["", "Hold me close tonight"]
-    assert "segments" not in meta
+    assert meta["vocal_start"] == 12.3 and meta["analysis_id"] == "-PaNew"
+    assert "No vocals" not in data["summary"]
     # The analysis and the full lyrics, word timings included, are both in the job folder.
     assert sorted(f["name"] for f in data["files"]) == ["-PaNew_analysis/lyrics.json", SEGMENT_FILE]
     assert "analysis_id: -PaNew" in data["summary"]
@@ -276,19 +317,60 @@ async def test_audio_features_and_tags_come_back_whole(client, sdk):
     sdk("tags", TAGS)
     features = await client.call_tool("audio_features", {"analysis_id": "-PaOld"})
     tags = await client.call_tool("tag_audio", {"analysis_id": "-PaOld"})
-    assert features.structured_content["metadata"]["song"]["energy"] == 0.71
-    assert features.structured_content["metadata"]["sections"][0]["label"] == "INTRO"
-    assert tags.structured_content["metadata"]["genre"] == ["UK Garage"]
-    assert tags.structured_content["metadata"]["description"] == TAGS["description"]
+    # The SDK's format 5 blocks, as they are, plus the analysis id.
+    assert features.structured_content["metadata"] == dict(FEATURES, analysis_id="-PaOld")
+    assert tags.structured_content["metadata"] == dict(TAGS, analysis_id="-PaOld")
+    assert tags.structured_content["metadata"]["stems"]["vocals"] == {"silent": True}
 
 
 @pytest.mark.anyio
 async def test_an_instrumental_says_so(client, sdk):
-    sdk("lyrics", {"lyrics": "", "is_instrumental": True, "lines": []})
+    sdk("lyrics", {"vocal_start": None, "lines": [], "warnings": []})
     result = await client.call_tool("get_lyrics", {"analysis_id": "-PaOld"})
     data = result.structured_content
-    assert data["metadata"]["lines"] == [] and data["metadata"]["is_instrumental"] is True
+    assert data["metadata"]["lines"] == [] and data["metadata"]["vocal_start"] is None
     assert "No vocals in this track." in data["summary"]
+
+
+def test_lyrics_metadata_keeps_vocal_start_and_shortens_the_lines():
+    shaped = server_mod._lyrics_metadata(LYRICS)
+    assert shaped == {
+        "vocal_start": 12.3,
+        "lines": [
+            {"start": 12.3, "end": 14.1, "text": "Hold me close"},
+            {"start": 15.0, "end": 16.2, "text": "tonight"},
+        ],
+        "warnings": [],
+    }
+    # A line an older analysis kept as plain text: its text, null times.
+    plain = server_mod._lyrics_metadata(
+        {"vocal_start": None, "lines": [{"start": None, "end": None, "text": "la la", "words": []}]}
+    )
+    assert plain["lines"] == [{"start": None, "end": None, "text": "la la"}]
+
+
+@pytest.mark.anyio
+async def test_the_analysis_tools_name_no_format_4_field(client):
+    """Tool texts describe format 5; the fields it removed are not offered to the model."""
+    tools = {t.name: t.description for t in (await client.list_tools()).tools}
+    texts = " ".join(
+        tools[name] for name in ("segment", "audio_features", "tag_audio", "get_lyrics")
+    )
+    for gone in (
+        "phrase",
+        "artist",
+        "song_tags",
+        "`genre`",
+        "`song`",
+        "is_instrumental",
+        "section_lyrics",
+        "first_vocal_beat_time",
+        "song_analysis",
+        "audio_segmentation",
+    ):
+        assert gone not in texts, gone
+    for field in ("`key`", "`features`", "`sections`", "`genres`", "`stems`", "`vocal_start`"):
+        assert field in texts, field
 
 
 @pytest.mark.anyio
@@ -403,7 +485,7 @@ async def test_a_timeout_after_a_new_analysis_names_it(client, settings, wav, sd
 
 @pytest.mark.anyio
 async def test_an_analysis_without_an_id_is_an_error_not_a_crash(client, wav, sdk):
-    sdk("segment", {"audio_segmentation": {}}, writes=SEGMENT_FILE)
+    sdk("segment", {"analysis": {}}, writes=SEGMENT_FILE)
     sdk.refuse("lyrics")
     result = await client.call_tool("get_lyrics", {"file_path": str(wav)})
     assert result.is_error and "without an analysis id" in result.content[0].text

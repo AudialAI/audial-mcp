@@ -320,7 +320,7 @@ def _analysis_note(tool: str, raw: Any) -> str:
             "uploads nothing and does not count as another run."
         )
     note = f" analysis_id: {analysis_id} (reuse it for the other add-ons)."
-    if tool == "get_lyrics" and raw.get("is_instrumental") is True:
+    if tool == "get_lyrics" and raw.get("lines") == [] and raw.get("vocal_start") is None:
         note += " No vocals in this track."
     return note
 
@@ -734,9 +734,10 @@ def _analysis_source(
 def _segment(src: Path, out: Path, relay: ProgressRelay, **options: Any) -> Any:
     """One analysis of the mix, saved into the job folder.
 
-    `expand_beats=False`: the SDK can add per-beat and per-bar lists rebuilt from the tempo
-    map, for scripts written against older analysis files. A model reads the tempo map
-    (`grid`) directly, and the lists would only make the result longer.
+    The SDK returns `{analysis_id, analysis, execution, files}`, `analysis` being the analysis
+    in format 5. `expand_beats=False` (the SDK's default since 2.0, passed so it stays so):
+    the SDK can add per-beat and per-bar lists rebuilt from the tempo map, but a model reads
+    the tempo map (`grid`) directly, and the lists would only make the result longer.
     """
     return audial.segment(
         file_path=str(src),
@@ -753,15 +754,6 @@ def _analysis_id_of(analysis: Any) -> str:
     if not isinstance(analysis_id, str) or not analysis_id:
         raise AudialError("The analysis finished without an analysis id, so nothing was added.")
     return analysis_id
-
-
-def _without_alias(analysis: Any) -> Any:
-    """The SDK also returns the analysis as `segmentation` (its 1.5 name): drop the copy."""
-    if isinstance(analysis, dict) and analysis.get("segmentation") is analysis.get(
-        "audio_segmentation"
-    ):
-        return {k: v for k, v in analysis.items() if k != "segmentation"}
-    return analysis
 
 
 async def _addon(
@@ -831,10 +823,10 @@ def _timed_lines(lines: Any) -> list[dict[str, Any]]:
 
 
 def _lyrics_metadata(result: Any) -> dict[str, Any]:
+    """The SDK's `{vocal_start, lines, warnings}` with each line as `{start, end, text}`."""
     if not isinstance(result, dict):
         return {"result": result}
-    # `segments` is the same lines again in the older shape.
-    shaped = {k: v for k, v in result.items() if k not in ("lines", "segments")}
+    shaped = {k: v for k, v in result.items() if k != "lines"}
     shaped["lines"] = _timed_lines(result.get("lines"))
     return shaped
 
@@ -944,19 +936,23 @@ async def segment(
 ) -> JobResult:
     """Find song sections, tempo and bars (about half a minute).
 
-    Use for song structure. Send the mix: no stems needed, and it counts as one run. The result
-    has the sections (with their phrases) and a tempo map. Beats and bars are not listed one by
-    one: `grid` describes them -- where each constant-tempo piece starts, its BPM, and its bar
-    and beat. Every beat time is start + k * 60 / bpm, and most tracks have one piece. The
-    `analysis_id` it returns adds audio_features, tag_audio, get_lyrics or generate_samples to
-    this analysis without another run. For tempo and key alone, analyze is quicker.
+    Use for song structure. Send the mix: no stems needed, and it counts as one run.
+    `metadata.analysis` is the analysis (format 5; every time in seconds): `bpm`,
+    `time_signature`, `key` and `camelot` (null when no key was found), `structure` ("dance"
+    or "song" section names), `bar1` (the first downbeat), `lead_in` (the time before bar 1,
+    or null), `sections` (label, start, end, start_bar, bars, fills: drum fill times) and a
+    tempo map. Beats and bars are not listed one by one: `grid` describes them -- where each
+    constant-tempo piece starts, its BPM, and its bar and beat. Every beat time is
+    start + k * 60 / bpm, and most tracks have one piece. The `analysis_id` it returns adds
+    audio_features, tag_audio, get_lyrics or generate_samples to this analysis without another
+    run. For tempo and key alone, analyze is quicker.
     """
     relay = ProgressRelay()
 
     def plan() -> tuple[str, Callable[[Path], Any]]:
         src = _file(file_path, AUDIO_EXTENSIONS, "audio file")
-        return slugify(src.stem), lambda out: _without_alias(
-            _segment(src, out, relay, genre=genre, edm=edm, features=features)
+        return slugify(src.stem), lambda out: _segment(
+            src, out, relay, genre=genre, edm=edm, features=features
         )
 
     return await _execute(ctx, "segment", plan, relay=relay)
@@ -968,15 +964,18 @@ async def audio_features(
     analysis_id: AnalysisId = None,
     file_path: AnalysisFilePath = None,
 ) -> JobResult:
-    """Measure energy, danceability, loudness, mode, key and tatum, for the song and each section.
+    """Measure energy, danceability and loudness for the song and each section, plus the key, mode and tatum.
 
     Give the analysis_id from segment: nothing is uploaded and it is included in that analysis's
     run. A file_path runs segment first (one run). Needs no stems, so it can run straight after
     segment. Energy and danceability run 0-1: energy reflects loudness, rhythmic activity and
     low end; danceability, how strong and regular the beat is. Both are measured per section,
-    so a drop reads higher than its breakdown. Loudness is in LUFS. The values are in
-    `metadata` (`song`, `sections`) and saved to the results folder.
-    """
+    so a drop reads higher than its breakdown. `loudness_lufs` is integrated loudness in LUFS.
+    The values are in `metadata`: `key` and `camelot`, `features` (energy, danceability,
+    loudness_lufs, mode, mode_confidence, tatum) and `sections` (label, start, end, energy,
+    danceability, loudness_lufs); null means not measured. They are saved to the results
+    folder.
+    """  # noqa: E501 (the first line is the bundle manifest's text, word for word)
     return await _addon(ctx, "audio_features", "audio_features", analysis_id, file_path, _as_dict)
 
 
@@ -986,13 +985,14 @@ async def tag_audio(
     analysis_id: AnalysisId = None,
     file_path: AnalysisFilePath = None,
 ) -> JobResult:
-    """Tag a track: genre, moods, instruments and artist tags for the mix and each part, plus a written description.
+    """Tag a track: genres, instruments and moods for the mix and each part, plus a written description.
 
     Give the analysis_id from segment: nothing is uploaded and it is included in that analysis's
     run. A file_path runs segment first (one run). Tags read the track's stems, which Audial
     makes automatically after each analysis: right after a new analysis this waits for them (a
-    few minutes). The tags are in `metadata` (`genre`, `song_tags`, `description`) and saved to
-    the results folder.
+    few minutes). The tags are in `metadata`: `genres`, `instruments` and `moods` of the mix,
+    `stems` (drums, bass, melody, vocals: each {instruments, moods}, or {silent: true} when
+    that part is silent) and `description`. They are saved to the results folder.
     """  # noqa: E501 (the first line is the bundle manifest's text, word for word)
     return await _addon(ctx, "tag_audio", "tags", analysis_id, file_path, _as_dict)
 
@@ -1009,8 +1009,9 @@ async def get_lyrics(
     run. A file_path runs segment first (one run). Lyrics read the vocal stem, which Audial makes
     automatically after each analysis: right after a new analysis this waits for it (a few
     minutes). `metadata.lines` has one {start, end, text} per line in seconds on the track's
-    timeline, `lyrics` the whole text and `section_lyrics` one entry per section. Word timings
-    are in the saved lyrics.json. An instrumental comes back with `is_instrumental` true.
+    timeline, and `vocal_start` when the vocal starts. Word timings ([word, start, end]) are
+    in the saved lyrics.json. A track without vocals comes back with no lines and
+    `vocal_start` null.
     """
     return await _addon(ctx, "get_lyrics", "lyrics", analysis_id, file_path, _lyrics_metadata)
 
