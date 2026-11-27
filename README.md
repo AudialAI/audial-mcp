@@ -213,6 +213,10 @@ It works differently from the local server:
 - **Long jobs don't hold the call open.** A job still running after 40 seconds returns
   `status: running` with a `job_id`. `check_job` takes that id and returns the result once
   the job is done. Only the account that started a job can check it.
+- **Sign-in keys from OAuth expire.** A key is trusted for up to 5 minutes, never past its
+  expiry. One with under 15 minutes left is refused with a 401, so the client refreshes it
+  before a job that runs on it. A key the API refuses mid-call is dropped, so the next request
+  gets the 401. Tokens need the `audial` scope; a user's own API key has it.
 - **ChatGPT hears no sales talk.** ChatGPT's plugin rules forbid plans, upgrades and checkout
   links. When a call comes from ChatGPT (recognised by the client its sign-in was issued to,
   the `_meta` ChatGPT adds to every call, or its user agent), a refusal says plainly that the

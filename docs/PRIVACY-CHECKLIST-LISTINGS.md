@@ -91,8 +91,9 @@ https://mcp.audialmusic.ai) actually does, so the policy can say it accurately. 
   and lost on restart.
 - [ ] **Sign-in check:** our server remembers that a key is valid for up to 5 minutes, in
   memory.
-- [ ] **The access key for ChatGPT or Claude:** kept until the user disconnects or revokes it,
-  or closes the account.
+- [ ] **The connection to ChatGPT or Claude:** each access key lasts 1 hour and the app renews
+  it by itself. The connection lasts until the user disconnects it or closes the account, and
+  ends after 90 days unused.
 - [ ] **Hosted-server logs:** kept by DigitalOcean for its log retention period, then deleted.
   The website agent should confirm the current period in DigitalOcean's docs before stating a
   number.
@@ -104,7 +105,7 @@ Check each app's menu path before publishing; the apps rename their settings now
 - [ ] **Disconnect in Claude:** Settings → Connectors → Audial → Disconnect.
 - [ ] **Revoke from Audial's side:** audialmusic.ai → Profile → Apps & API Keys → revoke the
   "ChatGPT" or "Claude" key. That app then can't use the account. Our server stops accepting
-  the key within 5 minutes.
+  the key within 5 minutes, or at once if a job is refused with it.
   - The exact label comes from the OAuth work (W1). Match it.
 - [ ] **Delete results:** in the dashboard, as today. A download link on the hosted server
   expires within 24 hours; to remove one sooner, email contact@audialmusic.ai.

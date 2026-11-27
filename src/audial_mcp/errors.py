@@ -92,8 +92,9 @@ REMOTE_SUBSCRIPTION_REQUIRED = (
     "subscription, or the account's free runs are used up."
 )
 REMOTE_AUTH_REJECTED = (
-    "Audial did not accept the credentials this connection uses. Reconnect Audial (or check "
-    "the API key) and try again."
+    "Audial did not accept this connection's sign-in: it may have expired or been disconnected. "
+    "Try again, and the app signs in again by itself; if it still fails, reconnect Audial (or "
+    "check the API key)."
 )
 
 

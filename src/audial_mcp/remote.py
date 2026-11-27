@@ -90,6 +90,13 @@ API_KEY_RE = re.compile(r"aud_[0-9a-f]{16}_[A-Za-z0-9_-]{32}")
 KEY_CACHE_TTL_S = 300
 KEY_CACHE_MAX = 10_000
 
+# "Sign in with Audial" issues keys that expire after an hour (refreshed by the client) with one
+# scope, "audial". A job runs on the key it started with for up to 15 minutes, so a key with
+# less left than that is refused (401) and the client refreshes it first; otherwise the API
+# would refuse the job's later calls and the job would fail. OAuth keys must live longer.
+OAUTH_SCOPE = "audial"
+OAUTH_MIN_LIFETIME_S = 15 * 60
+
 # Result folder names: 32 url-safe characters from `secrets.token_urlsafe(24)`.
 _FOLDER_RE = re.compile(r"[A-Za-z0-9_-]{32}")
 _NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -297,10 +304,18 @@ class AudialKeyVerifier:
     email. A key the API refuses is not a valid token (401); an API that cannot be reached is
     an error (500), so a client does not mistake an outage for a revoked sign-in.
 
-    A key minted by an OAuth sign-in also says which client it was issued to (`client_id`, and
-    `client_name` when the client registered one) and for which server (`resource`, the RFC 8707
-    resource indicator). A key issued for another server is refused; a plain API key, which
-    names neither, is accepted.
+    A key minted by an OAuth sign-in (whoami's `token_type: "oauth"`) also says:
+    - which client it was issued to (`client_id`, and `client_name` when the client registered
+      one);
+    - for which server (`resource`, the RFC 8707 resource indicator): one issued for another
+      server is refused;
+    - its `scope` and when it expires (`expires_at`, epoch seconds).
+
+    A valid key is trusted for 5 minutes, never past its expiry, and one with less than
+    `min_lifetime_s` left is refused so the client refreshes it. `forget` drops a key the API
+    refused during a call, so the next request is checked again and gets the 401. A user's own
+    API key (manual or device sign-in) has no audience, scope or expiry, and gets the full
+    scope: it can do anything the account can.
     """
 
     def __init__(
@@ -310,46 +325,81 @@ class AudialKeyVerifier:
         resource: str | None = None,
         ttl_s: float = KEY_CACHE_TTL_S,
         max_entries: int = KEY_CACHE_MAX,
+        min_lifetime_s: float = OAUTH_MIN_LIFETIME_S,
+        clock: Callable[[], float] = time.time,
     ):
         self._whoami = whoami
         self._resource = resource
         self._ttl_s = ttl_s
         self._max = max_entries
+        self._min_lifetime_s = min_lifetime_s
+        self._clock = clock
         self._cache: OrderedDict[str, tuple[float, AccessToken]] = OrderedDict()
+
+    @staticmethod
+    def _digest(token: str) -> str:
+        return hashlib.sha256(token.encode()).hexdigest()
+
+    def forget(self, token: str) -> None:
+        """Stop trusting `token` until the API has been asked about it again."""
+        self._cache.pop(self._digest(token), None)
+
+    def _usable(self, access: AccessToken) -> bool:
+        if access.expires_at is None:
+            return True
+        return access.expires_at - self._clock() >= self._min_lifetime_s
 
     async def verify_token(self, token: str) -> AccessToken | None:
         if not API_KEY_RE.fullmatch(token):
             return None
-        digest = hashlib.sha256(token.encode()).hexdigest()
+        digest = self._digest(token)
         hit = self._cache.get(digest)
-        if hit is not None and hit[0] > time.monotonic():
+        if hit is not None and hit[0] > self._clock():
+            if not self._usable(hit[1]):
+                self._cache.pop(digest, None)
+                return None
             self._cache.move_to_end(digest)
             return hit[1]
+        self._cache.pop(digest, None)
         try:
             who = await anyio.to_thread.run_sync(self._whoami, token)
         except AudialAuthError:
-            self._cache.pop(digest, None)
             return None
-        user_id = who.get("user_id") if isinstance(who, dict) else None
-        if not isinstance(user_id, str) or not user_id:
+        access = self._access(token, who)
+        if access is None or not self._usable(access):
             return None
-        resource = _text(who.get("resource"))
-        if resource and self._resource and not _same_resource(resource, self._resource):
-            log.info("refused a key issued for another server")
-            return None
-        access = AccessToken(
-            token=token,
-            client_id=_text(who.get("client_id")) or "audial-api-key",
-            scopes=[],
-            resource=resource,
-            subject=user_id,
-            claims={"email": _text(who.get("email")), "client_name": _text(who.get("client_name"))},
-        )
-        self._cache[digest] = (time.monotonic() + self._ttl_s, access)
+        until = self._clock() + self._ttl_s
+        if access.expires_at is not None:
+            until = min(until, access.expires_at)
+        self._cache[digest] = (until, access)
         self._cache.move_to_end(digest)
         while len(self._cache) > self._max:
             self._cache.popitem(last=False)
         return access
+
+    def _access(self, token: str, who: Any) -> AccessToken | None:
+        """The access token whoami's answer describes, or None if it is not one for us."""
+        user_id = who.get("user_id") if isinstance(who, dict) else None
+        if not isinstance(user_id, str) or not user_id:
+            return None
+        oauth = who.get("token_type") == "oauth"
+        resource = _text(who.get("resource"))
+        if oauth and resource and self._resource and not _same_resource(resource, self._resource):
+            log.info("refused a key issued for another server")
+            return None
+        expires_at = who.get("expires_at") if oauth else None
+        if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)):
+            expires_at = None
+        scope = _text(who.get("scope")) if oauth else None
+        return AccessToken(
+            token=token,
+            client_id=_text(who.get("client_id")) or "audial-api-key",
+            scopes=scope.split() if scope else [OAUTH_SCOPE],
+            expires_at=int(expires_at) if expires_at is not None else None,
+            resource=resource,
+            subject=user_id,
+            claims={"email": _text(who.get("email")), "client_name": _text(who.get("client_name"))},
+        )
 
 
 def _text(value: Any) -> str | None:
@@ -677,6 +727,8 @@ class RemoteJob:
     deadline: float
     done: threading.Event = field(default_factory=threading.Event)
     finished: float | None = None
+    # The key the job runs on, to stop trusting it if the API refuses it mid-job.
+    token: str = ""
     raw: Any = None
     error: BaseException | None = None
     # The finished JobResult, built once on the first call that sees the job done.
@@ -706,6 +758,7 @@ class JobBoard:
         made: dict[str, str],
         timeout_s: float,
         cleanup: Callable[[], Any],
+        token: str = "",
     ) -> RemoteJob:
         """Run `fn` in its own thread, in a copy of the caller's context (so the SDK sees the
         caller's credentials), and return the job at once."""
@@ -719,6 +772,7 @@ class JobBoard:
             made=made,
             started=now,
             deadline=now + timeout_s,
+            token=token,
         )
         context = contextvars.copy_context()
 
@@ -764,6 +818,14 @@ class Remote:
     restore_sdk: Callable[[], None] | None = None
     # The stdio server's settings before remote mode replaced them (restored by tests).
     saved_settings: Any = None
+    # The token verifier in use (see `forget`).
+    verifier: Any = None
+
+    def forget(self, token: str | None) -> None:
+        """The API refused `token`: stop trusting it, so the next request gets a 401."""
+        forget = getattr(self.verifier, "forget", None)
+        if token and forget is not None:
+            forget(token)
 
     @classmethod
     def create(cls, settings: RemoteSettings) -> Remote:
@@ -840,6 +902,9 @@ def build_app(server: Any, remote: Remote, verifier: TokenVerifier) -> Starlette
         # the 401's WWW-Authenticate header; without one there is nothing to point at.
         resource_server_url=f"{settings.public_url}{MCP_PATH}" if issuer else None,
         validate_token_resource=False if issuer else None,
+        # Published as the metadata's `scopes_supported` (Claude asks for what it lists) and
+        # required of every token. The verifier gives a user's own API key the scope too.
+        required_scopes=[OAUTH_SCOPE] if issuer else None,
     )
     public_host = urlsplit(settings.public_url).hostname or ""
     # Host/Origin checks only help a server that is reached on localhost; behind a public URL

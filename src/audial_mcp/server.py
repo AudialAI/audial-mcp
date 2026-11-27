@@ -243,8 +243,13 @@ def _tool_error(
 ) -> ToolError:
     """`to_tool_error`, with credentials scrubbed out of the message it produces.
 
-    Upstream error text can quote the request it failed on, which may carry the user id.
+    Upstream error text can quote the request it failed on, which may carry the user id. In
+    remote mode a key the API refused stops being trusted, so the caller's next request gets
+    the 401 that makes its client refresh or reconnect.
     """
+    if _remote is not None and isinstance(exc, AudialAuthError):
+        access = remote_mode.caller()
+        _remote.forget(access.token if access else None)
     error = to_tool_error(
         exc,
         tool=tool,
@@ -583,6 +588,8 @@ async def _await_job(ctx: Context, job: remote_mode.RemoteJob) -> JobResult:
     elif job.error is not None:
         error = job.error
         _discard_if_empty(job.output_dir)
+        if isinstance(error, AudialAuthError):
+            _remote.forget(job.token)
     else:
         if job.result is None:
             elapsed = int((job.finished or time.monotonic()) - job.started)
@@ -622,6 +629,7 @@ async def _execute_remote(
         output_dir = remote.results.new_job_dir()
         job = remote.jobs.start(
             owner=owner.subject if owner else "",
+            token=owner.token if owner else "",
             tool=tool,
             output_dir=output_dir,
             fn=lambda: call(output_dir),
@@ -1839,7 +1847,7 @@ def _remote_tool(tool: Tool, settings: remote_mode.RemoteSettings) -> Tool:
         meta["openai/fileParams"] = files
     if settings.authorization_server:
         # Every tool needs the user's account (OpenAI reads the `_meta` mirror of this field).
-        meta["securitySchemes"] = [{"type": "oauth2", "scopes": []}]
+        meta["securitySchemes"] = [{"type": "oauth2", "scopes": [remote_mode.OAUTH_SCOPE]}]
     description = REMOTE_DESCRIPTIONS.get(tool.name, tool.description)
     return tool.model_copy(
         update={"parameters": params, "meta": meta or None, "description": description}
@@ -1874,6 +1882,7 @@ def create_http_app(
     verifier = verifier or remote_mode.AudialKeyVerifier(
         resource=f"{settings.public_url}{remote_mode.MCP_PATH}"
     )
+    remote.verifier = verifier
     return remote_mode.build_app(server, remote, verifier)
 
 
@@ -1915,7 +1924,7 @@ def _remote_server(settings: remote_mode.RemoteSettings) -> MCPServer:
             read_only_hint=True, destructive_hint=False, open_world_hint=False, idempotent_hint=True
         ),
         meta=(
-            {"securitySchemes": [{"type": "oauth2", "scopes": []}]}
+            {"securitySchemes": [{"type": "oauth2", "scopes": [remote_mode.OAUTH_SCOPE]}]}
             if settings.authorization_server
             else None
         ),

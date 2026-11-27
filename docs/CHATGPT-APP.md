@@ -245,6 +245,14 @@ OAuth needs the same flow with a browser redirect instead of polling:
      check the audience (`validate_token_resource`).
    - The first version can omit expiry and refresh tokens: a key lasts until the user
      revokes it in their profile. Expiring keys with refresh tokens can come later.
+   - **As built (W1, 2026-11-27):** keys expire after 1 h, with rotating refresh tokens, and
+     carry one scope, `audial`. whoami adds `token_type: "oauth"`, `client_id`,
+     `client_name`, `resource`, `scope` and `expires_at`. The MCP server:
+     - trusts a key for 5 minutes, never past `expires_at`;
+     - refuses (401) a key with under 15 minutes left, so the client refreshes before a job
+       that runs on it;
+     - stops trusting a key the API refuses mid-call, so the next request gets the 401;
+     - lists `scopes_supported: ["audial"]`.
 
 After that, start the MCP server with `--authorization-server https://api.audialmusic.ai`.
 Nothing else in audial-mcp has to change: an OAuth token is an Audial key.
