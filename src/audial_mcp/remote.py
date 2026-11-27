@@ -68,6 +68,7 @@ log = logging.getLogger("audial_mcp")
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 MCP_PATH = "/mcp"
+HEALTH_PATH = "/healthz"
 FILES_PATH = "/files"
 DOMAIN_CHALLENGE_PATH = "/.well-known/openai-apps-challenge"
 DEFAULT_RESULTS_TTL_S = 24 * 60 * 60
@@ -132,6 +133,9 @@ class RemoteSettings:
     wait_s: int = DEFAULT_WAIT_S
     # The token OpenAI's domain verification asks the server's origin to serve, if set.
     domain_challenge: str | None = None
+    # How much the results may take on disk before the oldest go early; None for no cap. On a
+    # host whose disk is small and replaced when full (App Platform: 4 GiB), set it.
+    max_results_bytes: int | None = None
 
 
 def remote_settings(
@@ -156,6 +160,16 @@ def remote_settings(
     public = (public_url or env.get("AUDIAL_MCP_PUBLIC_URL") or f"http://{host}:{port}").rstrip("/")
     issuer = (authorization_server or env.get("AUDIAL_MCP_AUTHORIZATION_SERVER") or "").strip()
     work = env.get("AUDIAL_MCP_WORK_DIR") or str(Path(tempfile.gettempdir()) / "audial-mcp")
+    cap_mb = env.get("AUDIAL_MCP_MAX_RESULTS_MB")
+    if cap_mb:
+        try:
+            cap = int(cap_mb) * 1024 * 1024
+            if cap <= 0:
+                raise ValueError
+        except ValueError:
+            raise ValueError(
+                f"AUDIAL_MCP_MAX_RESULTS_MB must be a positive number of MB, got {cap_mb!r}"
+            ) from None
     return RemoteSettings(
         host=host,
         port=port,
@@ -165,6 +179,7 @@ def remote_settings(
         results_ttl_s=ttl,
         wait_s=wait,
         domain_challenge=(env.get("AUDIAL_MCP_DOMAIN_CHALLENGE") or "").strip() or None,
+        max_results_bytes=cap if cap_mb else None,
     )
 
 
@@ -187,22 +202,117 @@ def caller() -> AccessToken | None:
     return get_access_token()
 
 
+# --- which client is calling ----------------------------------------------------------------
+#
+# The same server serves ChatGPT, Claude and anything else, and ChatGPT's rules forbid showing
+# plans, upgrades or checkout links (see `audial_mcp.plain`). ChatGPT says who it is in three
+# ways, any one of which is enough:
+#
+# - the OAuth client its token was issued to (from the API's whoami, once OAuth is live):
+#   ChatGPT's client id is https://chatgpt.com/oauth/client.json, or a registered client named
+#   "ChatGPT";
+# - the `_meta` of every tool call: ChatGPT sends `openai/locale`, `openai/subject`,
+#   `openai/session` and more (older clients `webplus/i18n`);
+# - its HTTP user agent (`openai-mcp/...`).
+#
+# None of this is used to authorize anything. A client that pretends to be ChatGPT only gets
+# plainer wording.
+
+_CHATGPT_HOSTS = ("chatgpt.com", "openai.com")
+_CHATGPT_META_PREFIXES = ("openai/", "webplus/")
+
+_chatgpt: contextvars.ContextVar[bool] = contextvars.ContextVar("audial_mcp_chatgpt", default=False)
+
+
+def _chatgpt_client(access: AccessToken | None) -> bool:
+    if access is None:
+        return False
+    client_id = (access.client_id or "").strip().lower()
+    host = (urlsplit(client_id).hostname or "") if "://" in client_id else ""
+    if host in _CHATGPT_HOSTS or host.endswith(tuple(f".{h}" for h in _CHATGPT_HOSTS)):
+        return True
+    name = (access.claims or {}).get("client_name")
+    return any(
+        isinstance(v, str) and v.strip().lower() in ("chatgpt", "openai") for v in (client_id, name)
+    )
+
+
+def is_chatgpt(
+    *,
+    meta: Mapping[str, Any] | None,
+    headers: Mapping[str, str] | None,
+    access: AccessToken | None,
+) -> bool:
+    """Whether a tool call comes from ChatGPT, by its token's client, `_meta` or user agent."""
+    if _chatgpt_client(access):
+        return True
+    if meta and any(str(key).startswith(_CHATGPT_META_PREFIXES) for key in meta):
+        return True
+    agent = ((headers or {}).get("user-agent") or "").lower()
+    return "openai" in agent or "chatgpt" in agent
+
+
+def chatgpt_caller() -> bool:
+    """Whether the tool call being served comes from ChatGPT (set by `serving_call`)."""
+    return _chatgpt.get()
+
+
+@contextlib.contextmanager
+def serving_call(context: Any) -> Iterator[None]:
+    """Remember for the length of one tool call whether ChatGPT is the caller.
+
+    `context` is the MCP SDK's tool `Context`: its request context carries the call's `_meta`
+    and the HTTP request (with the user agent).
+    """
+    try:
+        request_context = context.request_context if context is not None else None
+    except ValueError:  # outside a request
+        request_context = None
+    request = getattr(request_context, "request", None)
+    token = _chatgpt.set(
+        is_chatgpt(
+            meta=getattr(request_context, "meta", None),
+            headers=getattr(request, "headers", None),
+            access=caller(),
+        )
+    )
+    try:
+        yield
+    finally:
+        _chatgpt.reset(token)
+
+
+def _same_resource(given: str, expected: str) -> bool:
+    """`given` names this server: the MCP URL itself, or its origin, with or without a slash."""
+    given = given.strip().rstrip("/")
+    expected = expected.rstrip("/")
+    origin = expected.removesuffix(MCP_PATH)
+    return given in (expected, origin)
+
+
 class AudialKeyVerifier:
     """Accept a bearer token that is a live Audial API key, and say whose it is.
 
     The access token's `subject` is the Audial user id and `claims["email"]` the account's
     email. A key the API refuses is not a valid token (401); an API that cannot be reached is
     an error (500), so a client does not mistake an outage for a revoked sign-in.
+
+    A key minted by an OAuth sign-in also says which client it was issued to (`client_id`, and
+    `client_name` when the client registered one) and for which server (`resource`, the RFC 8707
+    resource indicator). A key issued for another server is refused; a plain API key, which
+    names neither, is accepted.
     """
 
     def __init__(
         self,
         whoami: Callable[[str], dict[str, Any]] = device_login.whoami,
         *,
+        resource: str | None = None,
         ttl_s: float = KEY_CACHE_TTL_S,
         max_entries: int = KEY_CACHE_MAX,
     ):
         self._whoami = whoami
+        self._resource = resource
         self._ttl_s = ttl_s
         self._max = max_entries
         self._cache: OrderedDict[str, tuple[float, AccessToken]] = OrderedDict()
@@ -223,19 +333,27 @@ class AudialKeyVerifier:
         user_id = who.get("user_id") if isinstance(who, dict) else None
         if not isinstance(user_id, str) or not user_id:
             return None
-        email = who.get("email")
+        resource = _text(who.get("resource"))
+        if resource and self._resource and not _same_resource(resource, self._resource):
+            log.info("refused a key issued for another server")
+            return None
         access = AccessToken(
             token=token,
-            client_id="audial-api-key",
+            client_id=_text(who.get("client_id")) or "audial-api-key",
             scopes=[],
+            resource=resource,
             subject=user_id,
-            claims={"email": email if isinstance(email, str) else None},
+            claims={"email": _text(who.get("email")), "client_name": _text(who.get("client_name"))},
         )
         self._cache[digest] = (time.monotonic() + self._ttl_s, access)
         self._cache.move_to_end(digest)
         while len(self._cache) > self._max:
             self._cache.popitem(last=False)
         return access
+
+
+def _text(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
 def _request_api_key() -> str | None:
@@ -439,15 +557,19 @@ def fetch(
 
 
 class ResultStore:
-    """Job folders with unguessable names, served as download links until they expire."""
+    """Job folders with unguessable names, served as download links until they expire.
 
-    def __init__(self, root: Path, public_url: str, ttl_s: int):
+    With `max_bytes`, the oldest results also go once the folders together pass it.
+    """
+
+    def __init__(self, root: Path, public_url: str, ttl_s: int, max_bytes: int | None = None):
         root.mkdir(parents=True, exist_ok=True)
         with contextlib.suppress(OSError):
             os.chmod(root, 0o700)
         self.root = root.resolve()
         self.base = f"{public_url}{FILES_PATH}"
         self.ttl_s = ttl_s
+        self.max_bytes = max_bytes
 
     def new_job_dir(self) -> Path:
         self.sweep()
@@ -460,12 +582,36 @@ class ResultStore:
         return f"{self.base}/{quote(rel.as_posix())}"
 
     def sweep(self) -> None:
-        """Delete folders older than the TTL. Runs on each new job, so storage stays bounded."""
+        """Delete folders older than the TTL, then the oldest finished ones while over the cap.
+
+        Runs on each new job, so storage stays bounded. A folder with nothing in it belongs to
+        a job still running (results arrive when it ends), so the cap never takes one.
+        """
         cutoff = time.time() - self.ttl_s
+        fresh: list[tuple[float, Path]] = []
         for folder in self.root.iterdir():
             with contextlib.suppress(OSError):
-                if folder.is_dir() and folder.stat().st_mtime < cutoff:
+                if not folder.is_dir():
+                    continue
+                modified = folder.stat().st_mtime
+                if modified < cutoff:
                     shutil.rmtree(folder, ignore_errors=True)
+                else:
+                    fresh.append((modified, folder))
+        if self.max_bytes is None:
+            return
+        sizes = {folder: _size(folder) for _modified, folder in fresh}
+        total = sum(sizes.values())
+        removed = 0
+        for _modified, folder in sorted(fresh):
+            if total <= self.max_bytes:
+                break
+            if sizes[folder]:
+                shutil.rmtree(folder, ignore_errors=True)
+                total -= sizes[folder]
+                removed += 1
+        if removed:
+            log.warning("results over their cap: removed %d folder(s) before they expired", removed)
 
     def _folder(self, name: str) -> Path | None:
         if not _FOLDER_RE.fullmatch(name):
@@ -491,6 +637,15 @@ class ResultStore:
         if target not in files:
             return JSONResponse({"error": "No such file."}, 404)
         return FileResponse(target, filename=target.name, content_disposition_type="attachment")
+
+
+def _size(folder: Path) -> int:
+    total = 0
+    for path in folder.rglob("*"):
+        with contextlib.suppress(OSError):
+            if path.is_file() and not path.is_symlink():
+                total += path.stat().st_size
+    return total
 
 
 def _visible_files(folder: Path) -> list[Path]:
@@ -617,7 +772,12 @@ class Remote:
         inputs.mkdir(parents=True, exist_ok=True)
         with contextlib.suppress(OSError):
             os.chmod(work, 0o700)
-        results = ResultStore(work / "results", settings.public_url, settings.results_ttl_s)
+        results = ResultStore(
+            work / "results",
+            settings.public_url,
+            settings.results_ttl_s,
+            max_bytes=settings.max_results_bytes,
+        )
         # Inputs left behind by a process that stopped mid-job are of no use to anyone.
         cutoff = time.time() - settings.results_ttl_s
         for folder in inputs.iterdir():
@@ -696,7 +856,7 @@ def build_app(server: Any, remote: Remote, verifier: TokenVerifier) -> Starlette
 
     serve, methods = remote.results.serve, ["GET", "HEAD"]
     routes = [
-        Route("/healthz", health, methods=["GET"]),
+        Route(HEALTH_PATH, health, methods=["GET"]),
         Route(f"{FILES_PATH}/{{folder}}", serve, methods=methods),
         Route(f"{FILES_PATH}/{{folder}}/{{path:path}}", serve, methods=methods),
     ]

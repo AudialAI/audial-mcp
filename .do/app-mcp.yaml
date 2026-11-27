@@ -1,0 +1,105 @@
+# DigitalOcean App Platform: the hosted Audial MCP server at https://mcp.audialmusic.ai, the one
+# server the ChatGPT plugin and the Claude connector both point at.
+#
+# Create it only once "Sign in with Audial" (OAuth) is live on api.audialmusic.ai: this spec
+# publishes that issuer to every client, and the origin cannot change once a listing is out.
+#
+#   doctl apps create --spec .do/app-mcp.yaml          # first time
+#   doctl apps update <app id> --spec .do/app-mcp.yaml  # after editing this file
+#
+# Then add the CNAME App Platform shows for mcp.audialmusic.ai at GoDaddy, and check
+# https://mcp.audialmusic.ai/healthz reports the version just deployed.
+#
+# No secret lives here: the server holds no Audial key (each caller brings their own) and the
+# only token it serves, OpenAI's domain challenge, is set at submission time (see the end).
+name: audial-mcp-prod
+region: nyc # beside audial-api-prod, which every tool call goes to
+
+alerts:
+  - rule: DEPLOYMENT_FAILED
+  - rule: DOMAIN_FAILED
+
+domains:
+  - domain: mcp.audialmusic.ai
+    type: PRIMARY
+
+ingress:
+  rules:
+    - match:
+        path:
+          prefix: /
+      component:
+        name: audial-mcp
+
+services:
+  - name: audial-mcp
+    github:
+      repo: AudialAI/audial-mcp
+      branch: main
+      # Deploy on purpose, after a release: a restart forgets running jobs (see below).
+      deploy_on_push: false
+    dockerfile_path: .do/remote.Dockerfile
+    http_port: 8080
+    # One always-on instance: jobs and results live in this process and on its disk, so a
+    # second instance could not answer check_job or serve another's links. Basic tier,
+    # 1 vCPU, 1 GB: $10 a month.
+    instance_size_slug: apps-s-1vcpu-1gb-fixed
+    instance_count: 1
+    health_check:
+      http_path: /healthz
+      port: 8080
+      initial_delay_seconds: 10
+      period_seconds: 10
+      timeout_seconds: 5
+      failure_threshold: 3
+    # A redeploy lets calls in flight finish: each one returns within about 45 s.
+    termination:
+      drain_seconds: 60
+      grace_period_seconds: 90
+    alerts:
+      - rule: RESTART_COUNT
+        operator: GREATER_THAN
+        value: 2
+        window: ONE_HOUR
+      - rule: MEM_UTILIZATION
+        operator: GREATER_THAN
+        value: 85
+        window: FIVE_MINUTES
+    envs:
+      - key: AUDIAL_MCP_PUBLIC_URL
+        value: https://mcp.audialmusic.ai
+        scope: RUN_TIME
+      # Must equal the `issuer` in the API's OAuth metadata exactly. Claude uses only the first
+      # authorization server named, and both clients start sign-in from it.
+      - key: AUDIAL_MCP_AUTHORIZATION_SERVER
+        value: https://api.audialmusic.ai
+        scope: RUN_TIME
+      - key: AUDIAL_MCP_HOST
+        value: 0.0.0.0
+        scope: RUN_TIME
+      - key: PORT
+        value: "8080"
+        scope: RUN_TIME
+      # Results are download links for 24 h. App Platform's disk is 4 GiB, wiped on every
+      # deploy, and a full disk gets the container replaced: past 2.5 GB the oldest results go
+      # early. The rest is headroom for inputs being downloaded (up to 100 MB a job).
+      - key: AUDIAL_MCP_WORK_DIR
+        value: /tmp/audial-mcp
+        scope: RUN_TIME
+      - key: AUDIAL_MCP_RESULTS_TTL_S
+        value: "86400"
+        scope: RUN_TIME
+      - key: AUDIAL_MCP_MAX_RESULTS_MB
+        value: "2500"
+        scope: RUN_TIME
+      # How long a call waits for its job before returning a job_id for check_job. ChatGPT ends
+      # a tool call after about a minute, and App Platform ends a request at 100 s.
+      - key: AUDIAL_MCP_WAIT_S
+        value: "40"
+        scope: RUN_TIME
+      # OpenAI's domain verification, at submission: paste the portal's token as the value of
+      # AUDIAL_MCP_DOMAIN_CHALLENGE (in the App Platform console, or here before an update).
+      # The server then serves it at /.well-known/openai-apps-challenge. Not a secret.
+      # - key: AUDIAL_MCP_DOMAIN_CHALLENGE
+      #   value: "<token from platform.openai.com>"
+      #   scope: RUN_TIME

@@ -12,6 +12,18 @@ ChatGPT users can call Audial:
 
 Then comes OpenAI's review. The recommendation is in section 6.
 
+**Update, 2026-11-27 (0.11.0).** Zach decided to list Audial in both ChatGPT and Claude at
+launch. What changed:
+- Every tool's title and hints were decided (`tests/test_annotations.py`); `analyze` is now a
+  write.
+- ChatGPT is told plainly when an account has no runs left (`audial_mcp/plain.py`).
+- The hosting is set out as a DigitalOcean App Platform spec (`.do/app-mcp.yaml`).
+- The listing packs are `docs/LISTING-OPENAI.md` and `docs/LISTING-CLAUDE.md`.
+- The privacy policy additions are listed in `docs/PRIVACY-CHECKLIST-LISTINGS.md`.
+
+Claude's directory policy excludes music and voice models unless Anthropic agrees in writing.
+`docs/LISTING-CLAUDE.md` section 0 sets out Zach's choice.
+
 OpenAI renamed "apps" to "plugins" in July 2026: the Apps SDK docs moved to
 `developers.openai.com/plugins`, and the App Directory became the Plugin Directory. What a
 server has to do did not change.
@@ -153,8 +165,8 @@ reference voice, is the tool a reviewer is most likely to ask about.
 | Files in | local paths | `openai/fileParams` objects or https links, downloaded with SSRF and size checks; local paths refused | — |
 | Files out | written to the user's disk | download links, 24 h | optional: signed URLs from the API |
 | Jobs longer than a tool call | the call waits until done | waits 40 s, then returns a `job_id` for `check_job` | — |
-| Annotations | `destructiveHint` unset | all three hints explicit | — |
-| Upsell-free refusal text | "Subscribe at audialmusic.ai…" | neutral wording in remote mode | — |
+| Annotations | `destructiveHint` unset | all three hints explicit | — (0.11.0: titles and hints decided per tool; `analyze` is a write) |
+| Upsell-free refusal text | "Subscribe at audialmusic.ai…" | neutral wording in remote mode | — (0.11.0: ChatGPT gets "no runs left", with no plan, upgrade or link) |
 | Domain verification | none | `AUDIAL_MCP_DOMAIN_CHALLENGE` serves the token | the token, at submission |
 | Widget | none | none, which is allowed | optional audio player |
 
@@ -237,7 +249,17 @@ OAuth needs the same flow with a browser redirect instead of polling:
 After that, start the MCP server with `--authorization-server https://api.audialmusic.ai`.
 Nothing else in audial-mcp has to change: an OAuth token is an Audial key.
 
-### 4.2 Hosting (Zach decides)
+### 4.2 Hosting (decided 2026-11-27: DigitalOcean App Platform, `.do/app-mcp.yaml`)
+
+The spec has:
+- one always-on basic instance in nyc ($10 a month, quoted by DigitalOcean's `apps/propose`);
+- `.do/remote.Dockerfile`, which installs from `uv.lock` and runs as a non-root user;
+- a `/healthz` health check;
+- a 40 s wait, a 24 h results TTL and a 2.5 GB results cap (App Platform's disk is 4 GiB).
+
+App Platform's disk is wiped on every deploy, so a deploy also expires every download link.
+The original requirements follow.
+
 - **What it needs:**
   - A permanent HTTPS origin, for example `mcp.audialmusic.ai` (it can't change once
     published).
@@ -263,8 +285,6 @@ See section 5.
 - **SDK:** `stem_split`, `master` and `generate_midi` look the user id up without the key
   they were given. The remote server works around this; fixing it in the SDK would make the
   workaround unnecessary.
-- **`analyze` is marked read-only,** but it uploads the file and records an execution.
-  OpenAI counts starting a job as a write, so a reviewer may ask for `readOnlyHint: false`.
 - **An audio-player widget** for results: optional, and good for the listing.
 - **More than one instance** would need the job board and results in shared storage.
 

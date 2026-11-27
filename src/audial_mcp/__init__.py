@@ -2,7 +2,7 @@
 
 import os
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 
 # The environment as the client handed it to us, snapshotted before anything else runs.
 #
