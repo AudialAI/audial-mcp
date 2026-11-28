@@ -209,16 +209,6 @@ def caller() -> AccessToken | None:
     return get_access_token()
 
 
-def oauth_caller() -> bool:
-    """Whether the request being served signed in with "Sign in with Audial" (ChatGPT, Claude).
-
-    Such calls never count against the API's monthly or per-minute limits, unlike a user's own
-    API key.
-    """
-    access = caller()
-    return bool(access is not None and (access.claims or {}).get("oauth"))
-
-
 # --- which client is calling ----------------------------------------------------------------
 #
 # The same server serves ChatGPT, Claude and anything else, and ChatGPT's rules forbid showing
@@ -408,11 +398,7 @@ class AudialKeyVerifier:
             expires_at=int(expires_at) if expires_at is not None else None,
             resource=resource,
             subject=user_id,
-            claims={
-                "email": _text(who.get("email")),
-                "client_name": _text(who.get("client_name")),
-                "oauth": oauth,
-            },
+            claims={"email": _text(who.get("email")), "client_name": _text(who.get("client_name"))},
         )
 
 
