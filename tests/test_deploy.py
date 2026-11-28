@@ -85,11 +85,18 @@ def test_no_secret_value_is_committed(service):
     assert "AUDIAL_API_KEY" not in env_of(service)
 
 
-def test_the_image_is_built_from_this_repo_with_the_locked_versions(service):
-    assert service["github"]["repo"] == "AudialAI/audial-mcp"
-    assert service["github"]["branch"] == "main"
-    dockerfile = ROOT / service["dockerfile_path"]
-    text = dockerfile.read_text()
+def test_the_image_is_pinned_and_built_from_this_repo_with_the_locked_versions(service):
+    # App Platform has no GitHub access to AudialAI: it runs an image pushed to Docker Hub,
+    # pinned to a commit like the Audial API (a reused tag can keep serving an old build).
+    image = service["image"]
+    assert (image["registry_type"], image["registry"], image["repository"]) == (
+        "DOCKER_HUB",
+        "zfarrell13",
+        "audial-mcp-remote",
+    )
+    assert image["tag"] not in ("", "latest")
+    assert "github" not in service
+    text = (ROOT / ".do" / "remote.Dockerfile").read_text()
     assert "uv sync --locked --no-dev" in text  # uv.lock, not whatever PyPI has that day
     assert re.search(r"^USER \w+", text, re.M)  # not root
     assert re.search(r'^CMD \["audial-mcp", "--http"\]', text, re.M)

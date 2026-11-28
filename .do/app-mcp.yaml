@@ -4,11 +4,16 @@
 # Create it only once "Sign in with Audial" (OAuth) is live on api.audialmusic.ai: this spec
 # publishes that issuer to every client, and the origin cannot change once a listing is out.
 #
-#   doctl apps create --spec .do/app-mcp.yaml          # first time
-#   doctl apps update <app id> --spec .do/app-mcp.yaml  # after editing this file
+# It runs a pinned image, the same way the Audial API does (App Platform has no GitHub access to
+# AudialAI). To deploy a commit of main:
 #
-# Then add the CNAME App Platform shows for mcp.audialmusic.ai at GoDaddy, and check
-# https://mcp.audialmusic.ai/healthz reports the version just deployed.
+#   docker buildx build --platform linux/amd64 -f .do/remote.Dockerfile \
+#     -t zfarrell13/audial-mcp-remote:<full sha> --push .
+#
+# then set `image.tag` below to that sha and create or update the app with this spec
+# (`POST /v2/apps` the first time, `PUT /v2/apps/<id>` after). Add the CNAME App Platform shows for
+# mcp.audialmusic.ai at GoDaddy, and check https://mcp.audialmusic.ai/healthz reports the version
+# just deployed.
 #
 # No secret lives here: the server holds no Audial key (each caller brings their own) and the
 # only token it serves, OpenAI's domain challenge, is set at submission time (see the end).
@@ -33,12 +38,13 @@ ingress:
 
 services:
   - name: audial-mcp
-    github:
-      repo: AudialAI/audial-mcp
-      branch: main
-      # Deploy on purpose, after a release: a restart forgets running jobs (see below).
-      deploy_on_push: false
-    dockerfile_path: .do/remote.Dockerfile
+    # Built from .do/remote.Dockerfile. Deploy on purpose, after a release: a restart forgets
+    # running jobs (see below).
+    image:
+      registry_type: DOCKER_HUB
+      registry: zfarrell13
+      repository: audial-mcp-remote
+      tag: "<full sha>"
     http_port: 8080
     # One always-on instance: jobs and results live in this process and on its disk, so a
     # second instance could not answer check_job or serve another's links. Basic tier,
