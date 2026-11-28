@@ -1,7 +1,11 @@
 """Remote mode: the Audial tools over streamable HTTP, one Audial account per request.
 
 `audial-mcp --http` serves MCP at `<public url>/mcp` for clients that cannot start a local
-process (ChatGPT, web agents). It differs from the local (stdio) server in four ways:
+process (ChatGPT, web agents), and at `<public url>/claude/mcp` for the Claude directory
+connector: the same tools without music and voice generation (see `server.CLAUDE_OMITTED_TOOLS`).
+Both endpoints are one process with one set of jobs and results, and each publishes its own
+OAuth protected-resource metadata. Remote mode differs from the local (stdio) server in four
+ways:
 
 - **Credentials come with each request.** Every request carries the caller's own Audial API key
   as `Authorization: Bearer aud_...`. The key is checked against the API once (and cached for a
@@ -40,7 +44,7 @@ import tempfile
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -68,6 +72,8 @@ log = logging.getLogger("audial_mcp")
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 MCP_PATH = "/mcp"
+# The Claude directory connector's endpoint: every tool but music and voice generation.
+CLAUDE_MCP_PATH = "/claude/mcp"
 HEALTH_PATH = "/healthz"
 FILES_PATH = "/files"
 DOMAIN_CHALLENGE_PATH = "/.well-known/openai-apps-challenge"
@@ -289,12 +295,15 @@ def serving_call(context: Any) -> Iterator[None]:
         _chatgpt.reset(token)
 
 
-def _same_resource(given: str, expected: str) -> bool:
-    """`given` names this server: the MCP URL itself, or its origin, with or without a slash."""
+def _issued_for(given: str, resource: str, server: str) -> bool:
+    """Whether a token whose audience is `given` is one for the endpoint at `resource`.
+
+    It is if it names that endpoint, or the whole server (`server`, its public URL: what the API
+    issues when a client names no resource), with or without a trailing slash. A token for
+    another endpoint of this server is not.
+    """
     given = given.strip().rstrip("/")
-    expected = expected.rstrip("/")
-    origin = expected.removesuffix(MCP_PATH)
-    return given in (expected, origin)
+    return given in (resource.rstrip("/"), server.rstrip("/"))
 
 
 class AudialKeyVerifier:
@@ -307,8 +316,8 @@ class AudialKeyVerifier:
     A key minted by an OAuth sign-in (whoami's `token_type: "oauth"`) also says:
     - which client it was issued to (`client_id`, and `client_name` when the client registered
       one);
-    - for which server (`resource`, the RFC 8707 resource indicator): one issued for another
-      server is refused;
+    - for which server (`resource`, the RFC 8707 resource indicator), which `EndpointVerifier`
+      checks for each endpoint;
     - its `scope` and when it expires (`expires_at`, epoch seconds).
 
     A valid key is trusted for 5 minutes, never past its expiry, and one with less than
@@ -316,20 +325,21 @@ class AudialKeyVerifier:
     refused during a call, so the next request is checked again and gets the 401. A user's own
     API key (manual or device sign-in) has no audience, scope or expiry, and gets the full
     scope: it can do anything the account can.
+
+    One verifier serves every endpoint, so a key is looked up once whichever endpoint it is
+    used on, and a key the API refused is dropped for all of them.
     """
 
     def __init__(
         self,
         whoami: Callable[[str], dict[str, Any]] = device_login.whoami,
         *,
-        resource: str | None = None,
         ttl_s: float = KEY_CACHE_TTL_S,
         max_entries: int = KEY_CACHE_MAX,
         min_lifetime_s: float = OAUTH_MIN_LIFETIME_S,
         clock: Callable[[], float] = time.time,
     ):
         self._whoami = whoami
-        self._resource = resource
         self._ttl_s = ttl_s
         self._max = max_entries
         self._min_lifetime_s = min_lifetime_s
@@ -378,15 +388,13 @@ class AudialKeyVerifier:
         return access
 
     def _access(self, token: str, who: Any) -> AccessToken | None:
-        """The access token whoami's answer describes, or None if it is not one for us."""
+        """The access token whoami's answer describes, or None if it names no user."""
         user_id = who.get("user_id") if isinstance(who, dict) else None
         if not isinstance(user_id, str) or not user_id:
             return None
         oauth = who.get("token_type") == "oauth"
-        resource = _text(who.get("resource"))
-        if oauth and resource and self._resource and not _same_resource(resource, self._resource):
-            log.info("refused a key issued for another server")
-            return None
+        # Only an OAuth token has an audience; a user's own key is good on every endpoint.
+        resource = _text(who.get("resource")) if oauth else None
         expires_at = who.get("expires_at") if oauth else None
         if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)):
             expires_at = None
@@ -404,6 +412,30 @@ class AudialKeyVerifier:
 
 def _text(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+class EndpointVerifier:
+    """One endpoint's token check: the shared `verifier`, then the token's audience.
+
+    An OAuth token is accepted only if it was issued for this endpoint (`resource`, e.g.
+    https://mcp.audialmusic.ai/claude/mcp) or for the whole server (`server`, its public URL).
+    A token for the server's other endpoint is refused (401), so the client signs in for this
+    one. A token with no audience (a user's own API key) is accepted everywhere.
+    """
+
+    def __init__(self, verifier: TokenVerifier, *, resource: str, server: str):
+        self.verifier = verifier
+        self.resource = resource
+        self.server = server
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        access = await self.verifier.verify_token(token)
+        if access is None or access.resource is None:
+            return access
+        if not _issued_for(access.resource, self.resource, self.server):
+            log.info("refused a token issued for %s at %s", access.resource, self.resource)
+            return None
+        return access
 
 
 def _request_api_key() -> str | None:
@@ -887,8 +919,21 @@ LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
 _UNPUBLISHED_ISSUER = "https://api.audialmusic.ai"
 
 
-def build_app(server: Any, remote: Remote, verifier: TokenVerifier) -> Starlette:
-    """The ASGI app: MCP at /mcp behind bearer auth, plus the download links and a health check.
+@dataclass(frozen=True)
+class Endpoint:
+    """One MCP endpoint of the remote server: its path and the `MCPServer` that answers it."""
+
+    path: str
+    server: Any
+
+
+def build_app(remote: Remote, endpoints: Sequence[Endpoint], verifier: TokenVerifier) -> Starlette:
+    """The ASGI app: each MCP endpoint behind bearer auth, the download links, a health check.
+
+    Each endpoint is the MCP SDK's own streamable-HTTP app for its server, with its own
+    protected-resource metadata (`/.well-known/oauth-protected-resource<path>`) and a token
+    check that holds OAuth tokens to its audience (`EndpointVerifier` around the shared
+    `verifier`). Jobs, results and links are this process's, whichever endpoint started them.
 
     Stateless streamable HTTP: every POST is complete in itself, so any replica can serve any
     request and nothing has to stick to a session. Progress notifications still stream back on
@@ -896,16 +941,6 @@ def build_app(server: Any, remote: Remote, verifier: TokenVerifier) -> Starlette
     """
     settings = remote.settings
     issuer = settings.authorization_server
-    auth = AuthSettings(
-        issuer_url=issuer or _UNPUBLISHED_ISSUER,
-        # With an authorization server, publish RFC 9728 metadata so a client can find it from
-        # the 401's WWW-Authenticate header; without one there is nothing to point at.
-        resource_server_url=f"{settings.public_url}{MCP_PATH}" if issuer else None,
-        validate_token_resource=False if issuer else None,
-        # Published as the metadata's `scopes_supported` (Claude asks for what it lists) and
-        # required of every token. The verifier gives a user's own API key the scope too.
-        required_scopes=[OAUTH_SCOPE] if issuer else None,
-    )
     public_host = urlsplit(settings.public_url).hostname or ""
     # Host/Origin checks only help a server that is reached on localhost; behind a public URL
     # the bearer key is the protection, and an Origin check could turn away a real client.
@@ -934,15 +969,42 @@ def build_app(server: Any, remote: Remote, verifier: TokenVerifier) -> Starlette
             return PlainTextResponse(token)
 
         routes.append(Route(DOMAIN_CHALLENGE_PATH, challenge, methods=["GET"]))
-    return server._lowlevel_server.streamable_http_app(  # noqa: SLF001 (no public way to pass auth)
-        streamable_http_path=MCP_PATH,
-        stateless_http=True,
-        transport_security=security,
-        host=settings.host,
-        auth=auth,
-        token_verifier=verifier,
-        custom_starlette_routes=routes,
-    )
+
+    apps: list[Starlette] = []
+    for endpoint in endpoints:
+        resource = f"{settings.public_url}{endpoint.path}"
+        audience = EndpointVerifier(verifier, resource=resource, server=settings.public_url)
+        auth = AuthSettings(
+            issuer_url=issuer or _UNPUBLISHED_ISSUER,
+            # With an authorization server, publish RFC 9728 metadata so a client can find it
+            # from the 401's WWW-Authenticate header; without one there is nothing to point at.
+            resource_server_url=resource if issuer else None,
+            validate_token_resource=False if issuer else None,
+            # Published as the metadata's `scopes_supported` (Claude asks for what it lists) and
+            # required of every token. The verifier gives a user's own API key the scope too.
+            required_scopes=[OAUTH_SCOPE] if issuer else None,
+        )
+        app = endpoint.server._lowlevel_server.streamable_http_app(  # noqa: SLF001 (no public way to pass auth)
+            streamable_http_path=endpoint.path,
+            stateless_http=True,
+            transport_security=security,
+            host=settings.host,
+            auth=auth,
+            token_verifier=audience,
+        )
+        apps.append(app)
+        # The endpoint's app answers its own paths (the endpoint and its metadata), behind its
+        # own auth middleware.
+        routes.extend(Route(route.path, endpoint=app) for route in app.routes)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app: Starlette) -> AsyncIterator[None]:
+        async with contextlib.AsyncExitStack() as stack:
+            for app in apps:
+                await stack.enter_async_context(app.router.lifespan_context(app))
+            yield
+
+    return Starlette(routes=routes, lifespan=lifespan)
 
 
 def describe(settings: RemoteSettings) -> str:
@@ -955,6 +1017,7 @@ def describe(settings: RemoteSettings) -> str:
     return json.dumps(
         {
             "mcp": f"{settings.public_url}{MCP_PATH}",
+            "claude_mcp": f"{settings.public_url}{CLAUDE_MCP_PATH}",
             "listen": f"{settings.host}:{settings.port}",
             "auth": auth,
             "results_ttl_s": settings.results_ttl_s,

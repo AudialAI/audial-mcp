@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import contextvars
 import copy
 import logging
 import os
@@ -11,7 +12,7 @@ import re
 import sys
 import time
 import webbrowser
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Annotated, Any
@@ -1503,18 +1504,41 @@ async def text2vox(
     return await _execute(ctx, "text2vox", plan, relay=relay)
 
 
+# The tools `service_status` reports on, as its `tool` argument lists them.
+STATUS_TOOLS = (
+    "stem_split",
+    "analyze",
+    "segment",
+    "audio_features",
+    "tag_audio",
+    "get_lyrics",
+    "master",
+    "generate_samples",
+    "generate_midi",
+    "generate_music",
+    "sound2vital",
+    "sound2serum",
+    "text2vox",
+)
+
+
+def _status_tool_description(tools: Sequence[str]) -> str:
+    listed = f"{', '.join(tools[:-1])} or {tools[-1]}"
+    return f"Audial tool to report on: {listed}. Omit for all of them."
+
+
+# The tools the endpoint serving the current call leaves out (see `CLAUDE_OMITTED_TOOLS`).
+_omitted_tools: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVar(
+    "audial_mcp_omitted_tools", default=frozenset()
+)
+
+
 @mcp.tool(title="Service status", annotations=ACCOUNT_READ)
 async def service_status(
     ctx: Context,
     tool: Annotated[
         str | None,
-        Field(
-            description=(
-                "Audial tool to report on: stem_split, analyze, segment, audio_features, "
-                "tag_audio, get_lyrics, master, generate_samples, generate_midi, "
-                "generate_music, sound2vital, sound2serum or text2vox. Omit for all of them."
-            )
-        ),
+        Field(description=_status_tool_description(STATUS_TOOLS)),
     ] = None,
 ) -> dict[str, Any]:
     """Which Audial tools have a worker awake right now, and what a cold one will cost.
@@ -1528,13 +1552,18 @@ async def service_status(
     if _startup_error is not None:
         raise ToolError(str(_startup_error))
     try:
-        if (
-            tool is not None
-            and tool not in STATUS_FUNCTIONS
-            and tool not in _ADDON_FUNCTIONS
-            and tool not in _API_FUNCTIONS
+        # An endpoint that leaves tools out doesn't report on them, by either name.
+        omitted = _omitted_tools.get()
+        hidden = omitted | {STATUS_FUNCTIONS[t] for t in omitted if t in STATUS_FUNCTIONS}
+        if tool is not None and (
+            tool in hidden
+            or (
+                tool not in STATUS_FUNCTIONS
+                and tool not in _ADDON_FUNCTIONS
+                and tool not in _API_FUNCTIONS
+            )
         ):
-            known = ", ".join(sorted({*STATUS_FUNCTIONS, *_ADDON_FUNCTIONS}))
+            known = ", ".join(sorted({*STATUS_FUNCTIONS, *_ADDON_FUNCTIONS} - omitted))
             raise ValidationError(
                 f"{tool!r} is not an Audial tool. Give one of: {known}, or omit it for all."
             )
@@ -1543,6 +1572,15 @@ async def service_status(
         doc = await anyio.to_thread.run_sync(lambda: audial.status(function))
         if not isinstance(doc, dict):
             return _for_caller({"result": _redact(doc)})
+        if hidden and isinstance(doc.get("items"), list):
+            doc = {
+                **doc,
+                "items": [
+                    item
+                    for item in doc["items"]
+                    if not (isinstance(item, dict) and item.get("function") in hidden)
+                ],
+            }
 
         result: dict[str, Any] = _redact(doc)
         cold = [
@@ -1765,6 +1803,13 @@ async def sign_out() -> Account:
 # browser sign-in that saves a key on this machine.
 LOCAL_ONLY_TOOLS = frozenset({"list_results", "sign_in", "sign_out"})
 
+# Tools the Claude endpoint (/claude/mcp) neither lists nor runs. Claude's Software Directory
+# Policy 4B excludes software that uses AI models to generate audio, naming music models and
+# text-to-speech, unless Anthropic permits it in writing. Zach, 2026-11-28: the Claude listing
+# leaves out the two tools that generate music or a voice and asks no permission; everything
+# else stays (stem_split, master and generate_samples included). /mcp keeps every tool.
+CLAUDE_OMITTED_TOOLS = frozenset({"generate_music", "text2vox"})
+
 REMOTE_FILE_NOTE = (
     'A file the user attached to the chat, or {"download_url": "https://...", "file_id": '
     '"any id"} for a file at a public https link (the link to the file itself).'
@@ -1786,8 +1831,16 @@ REMOTE_DESCRIPTIONS = {
 }
 
 
-def _remote_instructions(settings: remote_mode.RemoteSettings) -> str:
+def _remote_instructions(
+    settings: remote_mode.RemoteSettings, omit: frozenset[str] = frozenset()
+) -> str:
     hours = max(1, settings.results_ttl_s // 3600)
+    rights = (
+        "Only use audio the user has the rights to. "
+        if "text2vox" in omit
+        else "Only use audio the user has the rights to, and for text2vox a reference voice "
+        "that is the user's own or one whose owner has given consent. "
+    )
     return (
         "Audial runs hosted audio tools on the user's Audial account. Give each tool its audio "
         "as a file the user attached to the chat, or as an https link to the file itself. "
@@ -1803,8 +1856,7 @@ def _remote_instructions(settings: remote_mode.RemoteSettings) -> str:
         "that shows up as a 'Warming up the machine' line, worth relaying as the reason for "
         "the wait; service_status says in advance which tools are warm. If a tool says the "
         "account has no runs left, pass that on as it is. "
-        "Only use audio the user has the rights to, and for text2vox a reference voice that is "
-        "the user's own or one whose owner has given consent. "
+        f"{rights}"
         "sound2vital and sound2serum model one isolated sound: a loop, melody or drum pattern "
         "gives a poor preset, so say so before running one and suggest trimming it to one "
         "note. After either tool, relay anything in `summary` about the match."
@@ -1833,10 +1885,19 @@ def _remote_description(description: str) -> str:
     return f"{text} {REMOTE_FILE_NOTE}"
 
 
-def _remote_tool(tool: Tool, settings: remote_mode.RemoteSettings) -> Tool:
-    """A copy of one tool for the remote server: file arguments as file objects, plus `_meta`."""
+def _remote_tool(
+    tool: Tool, settings: remote_mode.RemoteSettings, omit: frozenset[str] = frozenset()
+) -> Tool:
+    """A copy of one tool for the remote server: file arguments as file objects, plus `_meta`.
+
+    `omit` names the tools the endpoint leaves out, which no description may offer.
+    """
     params = copy.deepcopy(tool.parameters)
     properties = params.get("properties", {})
+    if tool.name == "service_status" and omit:
+        properties["tool"]["description"] = _status_tool_description(
+            [name for name in STATUS_TOOLS if name not in omit]
+        )
     files = sorted(name for name in properties if name in FILE_PARAMS)
     for name in files:
         properties[name] = _remote_file_schema(
@@ -1878,38 +1939,55 @@ def create_http_app(
     remote.saved_settings = _settings
     _settings = replace(_settings, api_key=None, user_id=None, results_dir=remote.results.root)
     _remote = remote
-    server = _remote_server(settings)
-    verifier = verifier or remote_mode.AudialKeyVerifier(
-        resource=f"{settings.public_url}{remote_mode.MCP_PATH}"
-    )
+    # One verifier for both endpoints: a key is looked up once, and forgotten everywhere.
+    verifier = verifier or remote_mode.AudialKeyVerifier()
     remote.verifier = verifier
-    return remote_mode.build_app(server, remote, verifier)
+    endpoints = [
+        remote_mode.Endpoint(remote_mode.MCP_PATH, _remote_server(settings)),
+        remote_mode.Endpoint(
+            remote_mode.CLAUDE_MCP_PATH, _remote_server(settings, omit=CLAUDE_OMITTED_TOOLS)
+        ),
+    ]
+    return remote_mode.build_app(remote, endpoints, verifier)
 
 
 class _RemoteServer(MCPServer):
-    """The remote `MCPServer`: each tool call knows whether ChatGPT is the caller."""
+    """The remote `MCPServer`: each tool call knows whether ChatGPT is the caller, and which
+    tools the endpoint leaves out (a tool it leaves out is unknown to it, like any other)."""
+
+    def __init__(self, *args: Any, omit: frozenset[str] = frozenset(), **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self.omit = omit
 
     async def call_tool(self, name: str, arguments: dict[str, Any], context: Any = None) -> Any:
-        with remote_mode.serving_call(context):
-            return await super().call_tool(name, arguments, context)
+        token = _omitted_tools.set(self.omit)
+        try:
+            with remote_mode.serving_call(context):
+                return await super().call_tool(name, arguments, context)
+        finally:
+            _omitted_tools.reset(token)
 
 
-def _remote_server(settings: remote_mode.RemoteSettings) -> MCPServer:
-    """The remote server's own `MCPServer`: copies of the shared tools, plus `check_job`.
+def _remote_server(
+    settings: remote_mode.RemoteSettings, *, omit: frozenset[str] = frozenset()
+) -> MCPServer:
+    """A remote endpoint's own `MCPServer`: copies of the shared tools, plus `check_job`.
 
+    `omit` names tools it neither lists nor runs (`CLAUDE_OMITTED_TOOLS` for /claude/mcp).
     Building it changes nothing in this process; `create_http_app` is what switches to remote
     mode.
     """
     tools = [
-        _remote_tool(tool, settings)
+        _remote_tool(tool, settings, omit)
         for tool in mcp._tool_manager.list_tools()  # noqa: SLF001 (the Tool objects, not wire copies)
-        if tool.name not in LOCAL_ONLY_TOOLS
+        if tool.name not in LOCAL_ONLY_TOOLS and tool.name not in omit
     ]
     server = _RemoteServer(
         "audial",
-        instructions=_remote_instructions(settings),
+        instructions=_remote_instructions(settings, omit),
         version=__version__,
         tools=tools,
+        omit=omit,
     )
     server.add_tool(
         check_job,
@@ -1956,8 +2034,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--http",
         action="store_true",
         help=(
-            "serve streamable HTTP at /mcp for remote clients instead; each request "
-            "authenticates with its own Audial API key (Authorization: Bearer aud_...)"
+            "serve streamable HTTP at /mcp (and /claude/mcp, without music and voice "
+            "generation) for remote clients instead; each request authenticates with its own "
+            "Audial API key (Authorization: Bearer aud_...)"
         ),
     )
     parser.add_argument("--host", help="address to listen on (default 127.0.0.1)")

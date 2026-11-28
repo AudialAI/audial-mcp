@@ -193,7 +193,8 @@ Every tool except `list_results` calls the Audial API, which requires an active 
 ## Remote server (streamable HTTP)
 
 `audial-mcp --http` runs the same tools as a remote MCP server, for clients that connect to
-a URL instead of starting a local process. It serves streamable HTTP at `/mcp`.
+a URL instead of starting a local process. It serves streamable HTTP at `/mcp`, and at
+`/claude/mcp` without music and voice generation (see below).
 
 ```bash
 uvx audial-mcp --http --host 0.0.0.0 --port 8000 --public-url https://mcp.example.com
@@ -217,6 +218,15 @@ It works differently from the local server:
   expiry. One with under 15 minutes left is refused with a 401, so the client refreshes it
   before a job that runs on it. A key the API refuses mid-call is dropped, so the next request
   gets the 401. Tokens need the `audial` scope; a user's own API key has it.
+- **Two endpoints, one server.** `/mcp` serves every remote tool; ChatGPT uses it.
+  `/claude/mcp` serves the same tools without `generate_music` and `text2vox`, for the Claude
+  directory, whose policy (4B) excludes music and voice generation. There, those two are
+  neither listed nor callable, and `service_status` doesn't report on them. Jobs, `check_job`
+  and download links are shared: a job started on one endpoint can be checked on the other.
+  Each endpoint publishes its own OAuth protected-resource metadata, at
+  `/.well-known/oauth-protected-resource/mcp` and `.../claude/mcp`. An OAuth token works on
+  the endpoint it was issued for, or on both if it was issued for the whole server (the public
+  URL). A user's own API key works on both.
 - **ChatGPT hears no sales talk.** ChatGPT's plugin rules forbid plans, upgrades and checkout
   links. When a call comes from ChatGPT (recognised by the client its sign-in was issued to,
   the `_meta` ChatGPT adds to every call, or its user agent), a refusal says plainly that the

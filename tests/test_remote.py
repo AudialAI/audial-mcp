@@ -476,12 +476,14 @@ async def serving(settings):
 
 
 @asynccontextmanager
-async def connect(app, key: str | None, extra_headers: dict[str, str] | None = None):
+async def connect(
+    app, key: str | None, extra_headers: dict[str, str] | None = None, *, path: str = "/mcp"
+):
     headers = {"Authorization": f"Bearer {key}"} if key else {}
     headers.update(extra_headers or {})
     transport = httpx2.ASGITransport(app=app)
     async with httpx2.AsyncClient(transport=transport, base_url=PUBLIC, headers=headers) as http:
-        async with Client(streamable_http_client(f"{PUBLIC}/mcp", http_client=http)) as client:
+        async with Client(streamable_http_client(f"{PUBLIC}{path}", http_client=http)) as client:
             yield client, http
 
 
@@ -879,6 +881,16 @@ async def test_tool_call_streams_are_not_buffered(tmp_path, stdio_settings):
 # --- what the token says about the caller ----------------------------------------------------
 
 
+def endpoint(whoami, path: str = "/mcp"):
+    """The verifier one endpoint of https://mcp.example.test uses: the shared key check, then
+    that endpoint's audience."""
+    return remote_mode.EndpointVerifier(
+        remote_mode.AudialKeyVerifier(whoami),
+        resource=f"https://mcp.example.test{path}",
+        server="https://mcp.example.test",
+    )
+
+
 @pytest.mark.anyio
 async def test_verifier_keeps_the_oauth_client_and_checks_the_audience():
     resource = "https://mcp.example.test/mcp"
@@ -889,29 +901,48 @@ async def test_verifier_keeps_the_oauth_client_and_checks_the_audience():
         KEY_B: {"user_id": "user-b", "token_type": "oauth",
                 "resource": "https://elsewhere.example.test/mcp"},
     }  # fmt: skip
-    verifier = remote_mode.AudialKeyVerifier(answers.__getitem__, resource=resource)
+    verifier = endpoint(answers.__getitem__)
     a = await verifier.verify_token(KEY_A)
     assert a.client_id == "https://chatgpt.com/oauth/client.json"
     assert a.claims["client_name"] == "ChatGPT" and a.resource == resource
     # Issued for another server: not a token for this one.
     assert await verifier.verify_token(KEY_B) is None
     # A plain API key carries no audience and no client, and is still accepted.
-    plain_key = remote_mode.AudialKeyVerifier(lambda _k: {"user_id": "u"}, resource=resource)
+    plain_key = endpoint(lambda _k: {"user_id": "u"})
     token = await plain_key.verify_token(KEY_A)
     assert token.subject == "u" and token.client_id == "audial-api-key" and token.resource is None
     # The origin alone, or a trailing slash, names the same server.
     for alias in ("https://mcp.example.test", "https://mcp.example.test/mcp/"):
-        same = remote_mode.AudialKeyVerifier(
-            lambda _k, alias=alias: {"user_id": "u", "token_type": "oauth", "resource": alias},
-            resource=resource,
+        same = endpoint(
+            lambda _k, alias=alias: {"user_id": "u", "token_type": "oauth", "resource": alias}
         )
         assert (await same.verify_token(KEY_A)) is not None, alias
     # A user's own API key isn't an OAuth token: the audience check doesn't apply to it.
-    own = remote_mode.AudialKeyVerifier(
-        lambda _k: {"user_id": "u", "resource": "https://elsewhere.example.test/mcp"},
-        resource=resource,
-    )
+    own = endpoint(lambda _k: {"user_id": "u", "resource": "https://elsewhere.example.test/mcp"})
     assert (await own.verify_token(KEY_A)) is not None
+
+
+@pytest.mark.anyio
+async def test_each_endpoint_holds_a_token_to_its_own_audience():
+    """A token for /mcp is not one for /claude/mcp, nor the other way round. One issued for the
+    whole server (what the API issues when a client names no resource) is good on both."""
+
+    def oauth(resource):
+        return lambda _k: {"user_id": "u", "token_type": "oauth", "resource": resource}
+
+    server = "https://mcp.example.test"
+    for issued, mcp_ok, claude_ok in (
+        (f"{server}/mcp", True, False),
+        (f"{server}/claude/mcp", False, True),
+        (f"{server}/claude/mcp/", False, True),
+        (server, True, True),
+        (f"{server}/", True, True),
+        (f"{server}/claude", False, False),
+        ("https://elsewhere.example.test/claude/mcp", False, False),
+    ):
+        on_mcp = await endpoint(oauth(issued)).verify_token(KEY_A)
+        on_claude = await endpoint(oauth(issued), "/claude/mcp").verify_token(KEY_A)
+        assert (on_mcp is not None, on_claude is not None) == (mcp_ok, claude_ok), issued
 
 
 def test_result_store_stays_under_its_size_cap(tmp_path):
@@ -1069,3 +1100,263 @@ async def test_an_api_refusal_turns_the_next_request_into_a_401(
             assert "resource_metadata=" in again.headers["www-authenticate"]
     finally:
         server_mod.disable_remote()
+
+
+# --- the Claude endpoint: every tool but music and voice generation --------------------------
+#
+# Zach, 2026-11-28: Claude's directory policy 4B excludes music and voice generation, so the
+# Claude listing gets its own endpoint, /claude/mcp, on the same server and process. It serves
+# every remote tool but generate_music and text2vox; /mcp keeps all of them for ChatGPT.
+
+CLAUDE = "/claude/mcp"
+EVERY_REMOTE_TOOL = (TOOLS - server_mod.LOCAL_ONLY_TOOLS) | {"check_job"}
+CLAUDE_TOOLS = EVERY_REMOTE_TOOL - {"generate_music", "text2vox"}
+
+
+def sse_json(text: str):
+    """The JSON-RPC message in a streamable-HTTP answer (an event stream, or plain JSON)."""
+    datas = [line[5:].strip() for line in text.splitlines() if line.startswith("data:")]
+    return json.loads(datas[-1] if datas else text)
+
+
+@pytest.mark.anyio
+async def test_the_claude_endpoint_lists_every_tool_but_music_and_voice_generation(
+    tmp_path, stdio_settings
+):
+    assert len(EVERY_REMOTE_TOOL) == 18 and len(CLAUDE_TOOLS) == 16
+    async with serving(settings_for(tmp_path)) as app:
+        async with connect(app, KEY_A, path=CLAUDE) as (client, _):
+            claude = {t.name: t for t in (await client.list_tools()).tools}
+            instructions = client.instructions
+        async with connect(app, KEY_A) as (client, _):
+            everything = {t.name: t for t in (await client.list_tools()).tools}
+    assert set(claude) == CLAUDE_TOOLS
+    assert set(everything) == EVERY_REMOTE_TOOL
+    # Nothing on the Claude endpoint points at the tools it leaves out.
+    for text in [instructions, *(json.dumps(t.model_dump(mode="json")) for t in claude.values())]:
+        assert "generate_music" not in text and "text2vox" not in text, text
+    assert "download links" in instructions and len(instructions) < 2048
+    # Every tool it keeps is the one /mcp serves.
+    for name, tool in claude.items():
+        same = everything[name]
+        assert tool.title == same.title and tool.annotations == same.annotations, name
+        assert tool.meta == same.meta, name
+        if name != "service_status":  # whose `tool` argument lists only the tools served
+            assert (tool.description, tool.input_schema) == (same.description, same.input_schema)
+
+
+@pytest.mark.anyio
+async def test_the_claude_endpoint_refuses_music_and_voice_generation_like_an_unknown_tool(
+    tmp_path, stdio_settings, web, monkeypatch
+):
+    web.pages["https://files.example.test/f/1"] = FakeResponse(body=WAV)
+    seen = []
+    fake_job(monkeypatch, "generate_music", seen=seen)
+    fake_job(monkeypatch, "text2vox", seen=seen)
+    headers = {**MCP_HEADERS, "authorization": f"Bearer {KEY_A}",
+               "mcp-protocol-version": "2025-06-18"}  # fmt: skip
+    attempts = {
+        "generate_music": {"prompt": "a waltz"},
+        "text2vox": {
+            "reference_file": attached(),
+            "lyrics": "la la",
+            "midi_file": attached(name="melody.mid"),
+        },
+    }
+
+    async with serving(settings_for(tmp_path)) as app, raw_http(app) as http:
+
+        async def call(path, name, arguments):
+            body = {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                    "params": {"name": name, "arguments": arguments}}  # fmt: skip
+            answer = await http.post(path, json=body, headers=headers)
+            assert answer.status_code == 200, answer.text
+            return sse_json(answer.text)
+
+        unknown = await call(CLAUDE, "no_such_tool", {})
+        assert unknown["result"]["isError"] is True
+        for name, arguments in attempts.items():
+            refused = await call(CLAUDE, name, arguments)
+            assert json.dumps(refused).replace(name, "no_such_tool") == json.dumps(unknown), name
+        assert seen == []  # nothing ran
+        # /mcp still runs it.
+        made = await call("/mcp", "generate_music", attempts["generate_music"])
+        assert made["result"]["isError"] is False
+    assert [s["user"] for s in seen] == ["user-a"]
+
+
+@pytest.mark.anyio
+async def test_the_claude_endpoint_publishes_its_own_protected_resource_metadata(
+    tmp_path, stdio_settings
+):
+    settings = settings_for(tmp_path, authorization_server="https://auth.example.test")
+    async with serving(settings) as app, raw_http(app) as http:
+        anonymous = await http.post(CLAUDE, json=LIST, headers=MCP_HEADERS)
+        assert anonymous.status_code == 401
+        challenge = anonymous.headers["www-authenticate"]
+        assert (
+            f'resource_metadata="{PUBLIC}/.well-known/oauth-protected-resource/claude/mcp"'
+            in challenge
+        )
+        claude = (await http.get("/.well-known/oauth-protected-resource/claude/mcp")).json()
+        everything = (await http.get("/.well-known/oauth-protected-resource/mcp")).json()
+        # /mcp's own answer is unchanged.
+        anonymous = await http.post("/mcp", json=LIST, headers=MCP_HEADERS)
+        metadata = f"{PUBLIC}/.well-known/oauth-protected-resource/mcp"
+        assert f'resource_metadata="{metadata}"' in anonymous.headers["www-authenticate"]
+    assert claude["resource"] == f"{PUBLIC}/claude/mcp"
+    assert everything["resource"] == f"{PUBLIC}/mcp"
+    assert claude["authorization_servers"] == everything["authorization_servers"]
+    assert claude["authorization_servers"] == ["https://auth.example.test"]
+    assert claude["scopes_supported"] == everything["scopes_supported"] == ["audial"]
+    # Without an authorization server there is no metadata to point at, on either endpoint.
+    async with serving(settings_for(tmp_path)) as app, raw_http(app) as http:
+        anonymous = await http.post(CLAUDE, json=LIST, headers=MCP_HEADERS)
+        assert anonymous.status_code == 401
+        assert "resource_metadata" not in anonymous.headers["www-authenticate"]
+        prm = await http.get("/.well-known/oauth-protected-resource/claude/mcp")
+        assert prm.status_code == 404
+
+
+def key(c: str) -> str:
+    return f"aud_{c * 16}_{c.upper() * 32}"
+
+
+@pytest.mark.anyio
+async def test_each_endpoint_accepts_oauth_tokens_issued_for_it(tmp_path, stdio_settings):
+    issued = {
+        key("1"): f"{PUBLIC}/mcp",  # ChatGPT, or a custom connector at /mcp
+        key("2"): f"{PUBLIC}/claude/mcp",  # the Claude directory connector
+        key("3"): PUBLIC,  # a client that named no resource: the API's default
+        key("4"): "https://elsewhere.example.test/mcp",
+    }
+    own = key("5")  # a user's own API key, not an OAuth token
+    calls = []
+
+    def whoami(token):
+        calls.append(token)
+        if token == own:
+            return {"user_id": "user-own"}
+        return {"user_id": "user-a", "token_type": "oauth", "scope": "audial",
+                "expires_at": time.time() + 3600, "resource": issued[token]}  # fmt: skip
+
+    expected = {
+        "/mcp": {key("1"): 200, key("2"): 401, key("3"): 200, key("4"): 401, own: 200},
+        CLAUDE: {key("1"): 401, key("2"): 200, key("3"): 200, key("4"): 401, own: 200},
+    }
+    settings = settings_for(tmp_path, authorization_server="https://auth.example.test")
+    app = server_mod.create_http_app(settings, remote_mode.AudialKeyVerifier(whoami))
+    try:
+        async with app.router.lifespan_context(app), raw_http(app) as http:
+            for path, answers in expected.items():
+                for token, status in answers.items():
+                    headers = {**MCP_HEADERS, "authorization": f"Bearer {token}",
+                               "mcp-protocol-version": "2025-06-18"}  # fmt: skip
+                    answer = await http.post(path, json=LIST, headers=headers)
+                    assert answer.status_code == status, (path, issued.get(token, "own key"))
+                    if status == 401:
+                        metadata = f"{PUBLIC}/.well-known/oauth-protected-resource{path}"
+                        challenge = answer.headers["www-authenticate"]
+                        assert f'resource_metadata="{metadata}"' in challenge
+    finally:
+        server_mod.disable_remote()
+    # One lookup per key whichever endpoint asked, and a token trusted on /mcp is still held
+    # to /claude/mcp's audience.
+    assert sorted(calls) == sorted(set(calls)) and len(calls) == 5
+
+
+@pytest.mark.anyio
+async def test_an_api_refusal_on_one_endpoint_is_a_401_on_both(
+    tmp_path, stdio_settings, web, monkeypatch
+):
+    web.pages["https://files.example.test/f/1"] = FakeResponse(body=WAV)
+    refused = {"now": False}
+
+    def whoami(_key):
+        if refused["now"]:
+            raise AudialAuthError("Authentication failed: 403")
+        return {"user_id": "user-a", "email": "a@example.test"}
+
+    def stem_split(**_kwargs):
+        refused["now"] = True
+        raise AudialAuthError("Authentication failed: 403")
+
+    monkeypatch.setattr(server_mod.audial, "stem_split", stem_split)
+    settings = settings_for(tmp_path, authorization_server="https://auth.example.test")
+    app = server_mod.create_http_app(settings, remote_mode.AudialKeyVerifier(whoami))
+    try:
+        async with app.router.lifespan_context(app):
+            async with connect(app, KEY_A) as (client, _):
+                assert (await client.list_tools()).tools
+            async with connect(app, KEY_A, path=CLAUDE) as (client, _):
+                failed = await client.call_tool("stem_split", {"file_path": attached()})
+                assert error_text(failed) == REMOTE_AUTH_REJECTED
+            async with raw_http(app) as http:
+                headers = {**MCP_HEADERS, "authorization": f"Bearer {KEY_A}"}
+                for path in ("/mcp", CLAUDE):
+                    again = await http.post(path, json=LIST, headers=headers)
+                    assert again.status_code == 401, path
+    finally:
+        server_mod.disable_remote()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("started_on, checked_on", [("/mcp", CLAUDE), (CLAUDE, "/mcp")])
+async def test_a_job_started_on_one_endpoint_can_be_checked_on_the_other(
+    tmp_path, stdio_settings, web, monkeypatch, started_on, checked_on
+):
+    web.pages["https://files.example.test/f/1"] = FakeResponse(body=WAV)
+    release = threading.Event()
+    fake_job(monkeypatch, "stem_split", release=release)
+    try:
+        async with serving(settings_for(tmp_path, AUDIAL_MCP_WAIT_S="1")) as app:
+            async with connect(app, KEY_A, path=started_on) as (client, _):
+                started = await client.call_tool("stem_split", {"file_path": attached()})
+                assert started.structured_content["metadata"]["status"] == "running"
+                job_id = started.structured_content["metadata"]["job_id"]
+            async with connect(app, KEY_B, path=checked_on) as (other, _):
+                stolen = await other.call_tool("check_job", {"job_id": job_id})
+                assert stolen.is_error and "no job with that id" in stolen.content[0].text
+            release.set()
+            async with connect(app, KEY_A, path=checked_on) as (client, http):
+                done = await client.call_tool("check_job", {"job_id": job_id})
+                assert not done.is_error, done.content
+                [info] = done.structured_content["files"]
+                assert info["name"] == "user-a.wav"
+                download = await http.get(info["path"].removeprefix(PUBLIC))
+                assert download.status_code == 200 and download.content == b"result-for-user-a"
+    finally:
+        release.set()
+
+
+@pytest.mark.anyio
+async def test_service_status_on_the_claude_endpoint_reports_only_the_tools_it_serves(
+    tmp_path, stdio_settings, monkeypatch
+):
+    asked = []
+
+    def status(function=None):
+        asked.append(function)
+        return {
+            "items": [
+                {"function": f, "warm": False, "expectedColdStartMs": 1000}
+                for f in ("stem-splitter", "music-generator", "text2vox")
+            ]
+        }
+
+    monkeypatch.setattr(audial, "status", status)
+    async with serving(settings_for(tmp_path)) as app:
+        async with connect(app, KEY_A, path=CLAUDE) as (client, _):
+            doc = (await client.call_tool("service_status", {})).structured_content
+            assert [item["function"] for item in doc["items"]] == ["stem-splitter"]
+            assert doc["cold"] == ["stem-splitter"]
+            for name in ("generate_music", "music-generator", "text2vox"):
+                refused = await client.call_tool("service_status", {"tool": name})
+                assert "is not an Audial tool" in error_text(refused), name
+                # The tools it suggests instead are the ones this endpoint serves.
+                suggested = error_text(refused).replace(f"'{name}'", "")
+                assert "generate_music" not in suggested and "text2vox" not in suggested
+        async with connect(app, KEY_A) as (client, _):
+            doc = (await client.call_tool("service_status", {})).structured_content
+            assert len(doc["items"]) == 3 and len(doc["cold"]) == 3
+    assert asked == [None, None]

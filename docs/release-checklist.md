@@ -14,7 +14,8 @@
 8. Redeploy the hosted server (`.do/app-mcp.yaml`, app `audial-mcp-prod`) from `main`: build and
    push `zfarrell13/audial-mcp-remote:<full sha>` as the spec's header says, then pin the app's
    `image.tag` to that sha. Then check that `https://mcp.audialmusic.ai/healthz` reports the new
-   version.
+   version, and that `/mcp` and `/claude/mcp` each answer 401 and serve their metadata at
+   `/.well-known/oauth-protected-resource/mcp` and `/.well-known/oauth-protected-resource/claude/mcp`.
    - A deploy restarts the server: running jobs are forgotten, and every download link it
      served expires. Deploy at a quiet hour.
    - A change to a tool's name, description or hints is a material change for both

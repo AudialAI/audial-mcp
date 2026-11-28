@@ -9,7 +9,9 @@ plans or upgrades.
 
 **Before submitting:**
 - OAuth ("Sign in with Audial") is live on api.audialmusic.ai.
-- The server runs at `https://mcp.audialmusic.ai/mcp` (`.do/app-mcp.yaml`).
+- The server runs at `https://mcp.audialmusic.ai/mcp` (`.do/app-mcp.yaml`). ChatGPT uses this
+  endpoint, with every tool. (The Claude listing uses `/claude/mcp`, without music and voice
+  generation: `docs/LISTING-CLAUDE.md`.)
 - The privacy policy has the additions in `docs/PRIVACY-CHECKLIST-LISTINGS.md`.
 
 **Zach fills in four things:** the links to his sample files, the video link, and the

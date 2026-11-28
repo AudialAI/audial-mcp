@@ -1,5 +1,6 @@
 # DigitalOcean App Platform: the hosted Audial MCP server at https://mcp.audialmusic.ai, the one
-# server the ChatGPT plugin and the Claude connector both point at.
+# server the ChatGPT plugin and the Claude connector both point at: ChatGPT at /mcp (every tool),
+# Claude at /claude/mcp (no music or voice generation). One process serves both.
 #
 # Create it only once "Sign in with Audial" (OAuth) is live on api.audialmusic.ai: this spec
 # publishes that issuer to every client, and the origin cannot change once a listing is out.
