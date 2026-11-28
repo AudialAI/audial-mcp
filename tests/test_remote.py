@@ -893,11 +893,13 @@ async def test_verifier_keeps_the_oauth_client_and_checks_the_audience():
     a = await verifier.verify_token(KEY_A)
     assert a.client_id == "https://chatgpt.com/oauth/client.json"
     assert a.claims["client_name"] == "ChatGPT" and a.resource == resource
+    assert a.claims["oauth"] is True
     # Issued for another server: not a token for this one.
     assert await verifier.verify_token(KEY_B) is None
     # A plain API key carries no audience and no client, and is still accepted.
     plain_key = remote_mode.AudialKeyVerifier(lambda _k: {"user_id": "u"}, resource=resource)
     token = await plain_key.verify_token(KEY_A)
+    assert token.claims["oauth"] is False
     assert token.subject == "u" and token.client_id == "audial-api-key" and token.resource is None
     # The origin alone, or a trailing slash, names the same server.
     for alias in ("https://mcp.example.test", "https://mcp.example.test/mcp/"):
