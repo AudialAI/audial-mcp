@@ -550,6 +550,26 @@ async def test_usage_returns_the_sdk_block(client, settings, monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_usage_tells_a_chatgpt_or_claude_connection_that_api_limits_do_not_apply(
+    client, settings, monkeypatch
+):
+    # Calls made with an OAuth sign-in (ChatGPT, Claude) never count against the API's monthly or
+    # per-minute limits (the Audial API, 2026-11-27), so the account's API numbers would mislead.
+    monkeypatch.setattr(server_mod.audial, "usage", lambda *a, **k: API_BLOCK, raising=False)
+    monkeypatch.setattr(server_mod, "_remote", object())
+    monkeypatch.setattr(server_mod.remote_mode, "oauth_caller", lambda: True)
+    result = await client.call_tool("usage", {})
+    assert not result.is_error, result.content[0].text
+    shown = result.structured_content
+    assert shown["apiLimitsApply"] is False
+    assert "monthlyLimit" not in shown and "remaining" not in shown
+    assert "don't count" in shown["notice"]
+    monkeypatch.setattr(server_mod.remote_mode, "chatgpt_caller", lambda: True)
+    chatgpt = (await client.call_tool("usage", {})).structured_content
+    assert "plan" not in chatgpt["notice"].lower()
+
+
+@pytest.mark.anyio
 async def test_usage_without_a_block_says_so(client, settings, monkeypatch):
     monkeypatch.setattr(server_mod.audial, "usage", lambda *a, **k: None, raising=False)
     result = await client.call_tool("usage", {})

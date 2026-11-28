@@ -1579,6 +1579,13 @@ async def usage(ctx: Context) -> dict[str, Any]:
     if _startup_error is not None:
         raise ToolError(str(_startup_error))
     try:
+        if _remote is not None and remote_mode.oauth_caller():
+            # The Audial API never counts a "Sign in with Audial" connection's calls against the
+            # account's API limits, so the account's API numbers would mislead here.
+            notice = "Calls through this connection don't count against Audial's API limits."
+            if not remote_mode.chatgpt_caller():  # ChatGPT: no word about plans (audial_mcp.plain)
+                notice += " Runs use the account's Audial plan, or its free runs."
+            return {"apiLimitsApply": False, "notice": notice}
         await _apply_credentials(ctx)
         block = await anyio.to_thread.run_sync(audial.usage)
         if not isinstance(block, dict):
