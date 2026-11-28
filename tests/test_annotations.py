@@ -87,6 +87,31 @@ async def test_every_remote_tool_has_a_title_and_the_decided_hints(tmp_path, iss
         _check(tool)
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("issuer", [None, "https://auth.example.test"])
+async def test_the_claude_endpoint_keeps_every_tool_s_title_and_hints(tmp_path, issuer):
+    """/claude/mcp leaves out generate_music and text2vox (policy 4B) and changes nothing about
+    the tools it keeps."""
+    settings = remote_mode.remote_settings(
+        host="127.0.0.1",
+        port=8000,
+        public_url="https://mcp.example.test",
+        authorization_server=issuer,
+        env={"AUDIAL_MCP_WORK_DIR": str(tmp_path)},
+    )
+    everything = {t.name: t for t in await server_mod._remote_server(settings).list_tools()}
+    claude = await server_mod._remote_server(
+        settings, omit=server_mod.CLAUDE_OMITTED_TOOLS
+    ).list_tools()
+    assert server_mod.CLAUDE_OMITTED_TOOLS == {"generate_music", "text2vox"}
+    assert {t.name for t in claude} == set(everything) - {"generate_music", "text2vox"}
+    assert len(claude) == 16
+    for tool in claude:
+        _check(tool)
+        same = everything[tool.name]
+        assert (tool.title, tool.annotations) == (same.title, same.annotations), tool.name
+
+
 def test_only_sign_out_is_destructive_and_no_job_tool_is_read_only():
     assert [name for name, hints in EXPECTED.items() if hints[1]] == ["sign_out"]
     jobs = {name for name, hints in EXPECTED.items() if hints == JOB}
