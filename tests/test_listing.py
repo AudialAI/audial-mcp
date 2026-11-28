@@ -19,6 +19,9 @@ from audial_mcp import remote as remote_mode
 
 DOCS = Path(__file__).resolve().parent.parent / "docs"
 MCP_URL = "https://mcp.audialmusic.ai/mcp"
+# Claude's directory policy 4B excludes music and voice generation, so the Claude listing points
+# at the endpoint without generate_music and text2vox (Zach, 2026-11-28).
+CLAUDE_URL = "https://mcp.audialmusic.ai/claude/mcp"
 
 # Nothing a listing says may advertise pricing, subscriptions, trials, discounts or promotions.
 SALES = re.compile(
@@ -39,15 +42,25 @@ def block_with(name: str, key: str) -> dict:
 
 
 @pytest.fixture(scope="module")
-def remote_tools(tmp_path_factory):
-    settings = remote_mode.remote_settings(
+def settings(tmp_path_factory):
+    return remote_mode.remote_settings(
         host="127.0.0.1",
         port=8000,
         public_url="https://mcp.audialmusic.ai",
         authorization_server="https://api.audialmusic.ai",
         env={"AUDIAL_MCP_WORK_DIR": str(tmp_path_factory.mktemp("work"))},
     )
+
+
+@pytest.fixture(scope="module")
+def remote_tools(settings):
     server = server_mod._remote_server(settings)
+    return {t.name for t in server._tool_manager.list_tools()}
+
+
+@pytest.fixture(scope="module")
+def claude_tools(settings):
+    server = server_mod._remote_server(settings, omit=server_mod.CLAUDE_OMITTED_TOOLS)
     return {t.name for t in server._tool_manager.list_tools()}
 
 
@@ -112,8 +125,9 @@ def connector():
     return block_with("LISTING-CLAUDE.md", "one_liner")
 
 
-def test_the_claude_listing_fits_the_portal(connector, remote_tools):
-    assert connector["server_url"] == MCP_URL
+def test_the_claude_listing_fits_the_portal(connector):
+    assert connector["server_url"] == CLAUDE_URL
+    assert CLAUDE_URL == f"https://mcp.audialmusic.ai{remote_mode.CLAUDE_MCP_PATH}"
     assert len(connector["name"]) <= 100 and len(connector["one_liner"]) <= 200
     assert len(connector["description"]) <= 2000
     assert 1 <= len(connector["categories"]) <= 5
@@ -124,3 +138,27 @@ def test_the_claude_listing_fits_the_portal(connector, remote_tools):
     assert len(connector["example_prompts"]) >= 3
     for text in (connector["one_liner"], connector["description"]):
         assert not SALES.search(text), SALES.search(text).group(0)
+
+
+# What the Claude endpoint leaves out, in words a listing might use for it.
+GENERATION = re.compile(
+    r"music model|generat\w* (?:\w+ )?(?:music|songs?|beats?|tracks?|vocals?)|\bsings?\b|\bsung\b|"
+    r"\bsinging\b|\bvoice|text-to-speech|\bmake an? .*\bbeat\b|generate_music|text2vox",
+    re.IGNORECASE,
+)
+
+
+def test_the_claude_listing_offers_only_what_the_claude_endpoint_serves(connector, claude_tools):
+    assert claude_tools.isdisjoint({"generate_music", "text2vox"})
+    texts = (connector["one_liner"], connector["description"], *connector["example_prompts"])
+    for text in texts:
+        assert not GENERATION.search(text), GENERATION.search(text).group(0)
+    described = connector["description"].lower()
+    for kept in ("stems", "master", "sample pack", "midi", "preset", "analyse"):
+        assert kept in described, kept
+
+
+def test_the_claude_pack_names_every_tool_on_both_sides_of_the_line(claude_tools):
+    text = (DOCS / "LISTING-CLAUDE.md").read_text()
+    for name in claude_tools | {"generate_music", "text2vox"}:
+        assert f"`{name}`" in text, name

@@ -36,5 +36,17 @@ jobs:
           test "$code" = 401
           curl -fsS http://127.0.0.1:8080/.well-known/oauth-protected-resource/mcp \
             | grep -q '"resource":"https://mcp.audialmusic.ai/mcp"'
+      # /claude/mcp: the Claude directory's endpoint (no music or voice generation).
+      - name: The Claude endpoint asks for sign-in and serves its own metadata
+        run: |
+          headers=$(curl -s -o /dev/null -D - -X POST -H 'content-type: application/json' \
+            --data '{}' http://127.0.0.1:8080/claude/mcp)
+          grep -q '^HTTP/[0-9.]* 401' <<< "$headers"
+          grep -qi '^www-authenticate:.*resource_metadata="https://mcp.audialmusic.ai/.well-known/oauth-protected-resource/claude/mcp"' <<< "$headers"
+          prm=$(curl -fsS http://127.0.0.1:8080/.well-known/oauth-protected-resource/claude/mcp)
+          echo "$prm"
+          grep -q '"resource":"https://mcp.audialmusic.ai/claude/mcp"' <<< "$prm"
+          grep -q '"authorization_servers":\["https://api.audialmusic.ai"\]' <<< "$prm"
+          grep -q '"scopes_supported":\["audial"\]' <<< "$prm"
       - if: always()
         run: docker logs mcp || true
