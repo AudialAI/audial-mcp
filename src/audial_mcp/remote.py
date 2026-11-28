@@ -68,6 +68,7 @@ log = logging.getLogger("audial_mcp")
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 MCP_PATH = "/mcp"
+HEALTH_PATH = "/healthz"
 FILES_PATH = "/files"
 DOMAIN_CHALLENGE_PATH = "/.well-known/openai-apps-challenge"
 DEFAULT_RESULTS_TTL_S = 24 * 60 * 60
@@ -88,6 +89,13 @@ API_KEY_RE = re.compile(r"aud_[0-9a-f]{16}_[A-Za-z0-9_-]{32}")
 # every real call regardless; this only spares it a lookup on each MCP message.
 KEY_CACHE_TTL_S = 300
 KEY_CACHE_MAX = 10_000
+
+# "Sign in with Audial" issues keys that expire after an hour (refreshed by the client) with one
+# scope, "audial". A job runs on the key it started with for up to 15 minutes, so a key with
+# less left than that is refused (401) and the client refreshes it first; otherwise the API
+# would refuse the job's later calls and the job would fail. OAuth keys must live longer.
+OAUTH_SCOPE = "audial"
+OAUTH_MIN_LIFETIME_S = 15 * 60
 
 # Result folder names: 32 url-safe characters from `secrets.token_urlsafe(24)`.
 _FOLDER_RE = re.compile(r"[A-Za-z0-9_-]{32}")
@@ -132,6 +140,9 @@ class RemoteSettings:
     wait_s: int = DEFAULT_WAIT_S
     # The token OpenAI's domain verification asks the server's origin to serve, if set.
     domain_challenge: str | None = None
+    # How much the results may take on disk before the oldest go early; None for no cap. On a
+    # host whose disk is small and replaced when full (App Platform: 4 GiB), set it.
+    max_results_bytes: int | None = None
 
 
 def remote_settings(
@@ -156,6 +167,16 @@ def remote_settings(
     public = (public_url or env.get("AUDIAL_MCP_PUBLIC_URL") or f"http://{host}:{port}").rstrip("/")
     issuer = (authorization_server or env.get("AUDIAL_MCP_AUTHORIZATION_SERVER") or "").strip()
     work = env.get("AUDIAL_MCP_WORK_DIR") or str(Path(tempfile.gettempdir()) / "audial-mcp")
+    cap_mb = env.get("AUDIAL_MCP_MAX_RESULTS_MB")
+    if cap_mb:
+        try:
+            cap = int(cap_mb) * 1024 * 1024
+            if cap <= 0:
+                raise ValueError
+        except ValueError:
+            raise ValueError(
+                f"AUDIAL_MCP_MAX_RESULTS_MB must be a positive number of MB, got {cap_mb!r}"
+            ) from None
     return RemoteSettings(
         host=host,
         port=port,
@@ -165,6 +186,7 @@ def remote_settings(
         results_ttl_s=ttl,
         wait_s=wait,
         domain_challenge=(env.get("AUDIAL_MCP_DOMAIN_CHALLENGE") or "").strip() or None,
+        max_results_bytes=cap if cap_mb else None,
     )
 
 
@@ -187,55 +209,201 @@ def caller() -> AccessToken | None:
     return get_access_token()
 
 
+# --- which client is calling ----------------------------------------------------------------
+#
+# The same server serves ChatGPT, Claude and anything else, and ChatGPT's rules forbid showing
+# plans, upgrades or checkout links (see `audial_mcp.plain`). ChatGPT says who it is in three
+# ways, any one of which is enough:
+#
+# - the OAuth client its token was issued to (from the API's whoami, once OAuth is live):
+#   ChatGPT's client id is https://chatgpt.com/oauth/client.json, or a registered client named
+#   "ChatGPT";
+# - the `_meta` of every tool call: ChatGPT sends `openai/locale`, `openai/subject`,
+#   `openai/session` and more (older clients `webplus/i18n`);
+# - its HTTP user agent (`openai-mcp/...`).
+#
+# None of this is used to authorize anything. A client that pretends to be ChatGPT only gets
+# plainer wording.
+
+_CHATGPT_HOSTS = ("chatgpt.com", "openai.com")
+_CHATGPT_META_PREFIXES = ("openai/", "webplus/")
+
+_chatgpt: contextvars.ContextVar[bool] = contextvars.ContextVar("audial_mcp_chatgpt", default=False)
+
+
+def _chatgpt_client(access: AccessToken | None) -> bool:
+    if access is None:
+        return False
+    client_id = (access.client_id or "").strip().lower()
+    host = (urlsplit(client_id).hostname or "") if "://" in client_id else ""
+    if host in _CHATGPT_HOSTS or host.endswith(tuple(f".{h}" for h in _CHATGPT_HOSTS)):
+        return True
+    name = (access.claims or {}).get("client_name")
+    return any(
+        isinstance(v, str) and v.strip().lower() in ("chatgpt", "openai") for v in (client_id, name)
+    )
+
+
+def is_chatgpt(
+    *,
+    meta: Mapping[str, Any] | None,
+    headers: Mapping[str, str] | None,
+    access: AccessToken | None,
+) -> bool:
+    """Whether a tool call comes from ChatGPT, by its token's client, `_meta` or user agent."""
+    if _chatgpt_client(access):
+        return True
+    if meta and any(str(key).startswith(_CHATGPT_META_PREFIXES) for key in meta):
+        return True
+    agent = ((headers or {}).get("user-agent") or "").lower()
+    return "openai" in agent or "chatgpt" in agent
+
+
+def chatgpt_caller() -> bool:
+    """Whether the tool call being served comes from ChatGPT (set by `serving_call`)."""
+    return _chatgpt.get()
+
+
+@contextlib.contextmanager
+def serving_call(context: Any) -> Iterator[None]:
+    """Remember for the length of one tool call whether ChatGPT is the caller.
+
+    `context` is the MCP SDK's tool `Context`: its request context carries the call's `_meta`
+    and the HTTP request (with the user agent).
+    """
+    try:
+        request_context = context.request_context if context is not None else None
+    except ValueError:  # outside a request
+        request_context = None
+    request = getattr(request_context, "request", None)
+    token = _chatgpt.set(
+        is_chatgpt(
+            meta=getattr(request_context, "meta", None),
+            headers=getattr(request, "headers", None),
+            access=caller(),
+        )
+    )
+    try:
+        yield
+    finally:
+        _chatgpt.reset(token)
+
+
+def _same_resource(given: str, expected: str) -> bool:
+    """`given` names this server: the MCP URL itself, or its origin, with or without a slash."""
+    given = given.strip().rstrip("/")
+    expected = expected.rstrip("/")
+    origin = expected.removesuffix(MCP_PATH)
+    return given in (expected, origin)
+
+
 class AudialKeyVerifier:
     """Accept a bearer token that is a live Audial API key, and say whose it is.
 
     The access token's `subject` is the Audial user id and `claims["email"]` the account's
     email. A key the API refuses is not a valid token (401); an API that cannot be reached is
     an error (500), so a client does not mistake an outage for a revoked sign-in.
+
+    A key minted by an OAuth sign-in (whoami's `token_type: "oauth"`) also says:
+    - which client it was issued to (`client_id`, and `client_name` when the client registered
+      one);
+    - for which server (`resource`, the RFC 8707 resource indicator): one issued for another
+      server is refused;
+    - its `scope` and when it expires (`expires_at`, epoch seconds).
+
+    A valid key is trusted for 5 minutes, never past its expiry, and one with less than
+    `min_lifetime_s` left is refused so the client refreshes it. `forget` drops a key the API
+    refused during a call, so the next request is checked again and gets the 401. A user's own
+    API key (manual or device sign-in) has no audience, scope or expiry, and gets the full
+    scope: it can do anything the account can.
     """
 
     def __init__(
         self,
         whoami: Callable[[str], dict[str, Any]] = device_login.whoami,
         *,
+        resource: str | None = None,
         ttl_s: float = KEY_CACHE_TTL_S,
         max_entries: int = KEY_CACHE_MAX,
+        min_lifetime_s: float = OAUTH_MIN_LIFETIME_S,
+        clock: Callable[[], float] = time.time,
     ):
         self._whoami = whoami
+        self._resource = resource
         self._ttl_s = ttl_s
         self._max = max_entries
+        self._min_lifetime_s = min_lifetime_s
+        self._clock = clock
         self._cache: OrderedDict[str, tuple[float, AccessToken]] = OrderedDict()
+
+    @staticmethod
+    def _digest(token: str) -> str:
+        return hashlib.sha256(token.encode()).hexdigest()
+
+    def forget(self, token: str) -> None:
+        """Stop trusting `token` until the API has been asked about it again."""
+        self._cache.pop(self._digest(token), None)
+
+    def _usable(self, access: AccessToken) -> bool:
+        if access.expires_at is None:
+            return True
+        return access.expires_at - self._clock() >= self._min_lifetime_s
 
     async def verify_token(self, token: str) -> AccessToken | None:
         if not API_KEY_RE.fullmatch(token):
             return None
-        digest = hashlib.sha256(token.encode()).hexdigest()
+        digest = self._digest(token)
         hit = self._cache.get(digest)
-        if hit is not None and hit[0] > time.monotonic():
+        if hit is not None and hit[0] > self._clock():
+            if not self._usable(hit[1]):
+                self._cache.pop(digest, None)
+                return None
             self._cache.move_to_end(digest)
             return hit[1]
+        self._cache.pop(digest, None)
         try:
             who = await anyio.to_thread.run_sync(self._whoami, token)
         except AudialAuthError:
-            self._cache.pop(digest, None)
             return None
-        user_id = who.get("user_id") if isinstance(who, dict) else None
-        if not isinstance(user_id, str) or not user_id:
+        access = self._access(token, who)
+        if access is None or not self._usable(access):
             return None
-        email = who.get("email")
-        access = AccessToken(
-            token=token,
-            client_id="audial-api-key",
-            scopes=[],
-            subject=user_id,
-            claims={"email": email if isinstance(email, str) else None},
-        )
-        self._cache[digest] = (time.monotonic() + self._ttl_s, access)
+        until = self._clock() + self._ttl_s
+        if access.expires_at is not None:
+            until = min(until, access.expires_at)
+        self._cache[digest] = (until, access)
         self._cache.move_to_end(digest)
         while len(self._cache) > self._max:
             self._cache.popitem(last=False)
         return access
+
+    def _access(self, token: str, who: Any) -> AccessToken | None:
+        """The access token whoami's answer describes, or None if it is not one for us."""
+        user_id = who.get("user_id") if isinstance(who, dict) else None
+        if not isinstance(user_id, str) or not user_id:
+            return None
+        oauth = who.get("token_type") == "oauth"
+        resource = _text(who.get("resource"))
+        if oauth and resource and self._resource and not _same_resource(resource, self._resource):
+            log.info("refused a key issued for another server")
+            return None
+        expires_at = who.get("expires_at") if oauth else None
+        if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)):
+            expires_at = None
+        scope = _text(who.get("scope")) if oauth else None
+        return AccessToken(
+            token=token,
+            client_id=_text(who.get("client_id")) or "audial-api-key",
+            scopes=scope.split() if scope else [OAUTH_SCOPE],
+            expires_at=int(expires_at) if expires_at is not None else None,
+            resource=resource,
+            subject=user_id,
+            claims={"email": _text(who.get("email")), "client_name": _text(who.get("client_name"))},
+        )
+
+
+def _text(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
 def _request_api_key() -> str | None:
@@ -439,15 +607,19 @@ def fetch(
 
 
 class ResultStore:
-    """Job folders with unguessable names, served as download links until they expire."""
+    """Job folders with unguessable names, served as download links until they expire.
 
-    def __init__(self, root: Path, public_url: str, ttl_s: int):
+    With `max_bytes`, the oldest results also go once the folders together pass it.
+    """
+
+    def __init__(self, root: Path, public_url: str, ttl_s: int, max_bytes: int | None = None):
         root.mkdir(parents=True, exist_ok=True)
         with contextlib.suppress(OSError):
             os.chmod(root, 0o700)
         self.root = root.resolve()
         self.base = f"{public_url}{FILES_PATH}"
         self.ttl_s = ttl_s
+        self.max_bytes = max_bytes
 
     def new_job_dir(self) -> Path:
         self.sweep()
@@ -460,12 +632,36 @@ class ResultStore:
         return f"{self.base}/{quote(rel.as_posix())}"
 
     def sweep(self) -> None:
-        """Delete folders older than the TTL. Runs on each new job, so storage stays bounded."""
+        """Delete folders older than the TTL, then the oldest finished ones while over the cap.
+
+        Runs on each new job, so storage stays bounded. A folder with nothing in it belongs to
+        a job still running (results arrive when it ends), so the cap never takes one.
+        """
         cutoff = time.time() - self.ttl_s
+        fresh: list[tuple[float, Path]] = []
         for folder in self.root.iterdir():
             with contextlib.suppress(OSError):
-                if folder.is_dir() and folder.stat().st_mtime < cutoff:
+                if not folder.is_dir():
+                    continue
+                modified = folder.stat().st_mtime
+                if modified < cutoff:
                     shutil.rmtree(folder, ignore_errors=True)
+                else:
+                    fresh.append((modified, folder))
+        if self.max_bytes is None:
+            return
+        sizes = {folder: _size(folder) for _modified, folder in fresh}
+        total = sum(sizes.values())
+        removed = 0
+        for _modified, folder in sorted(fresh):
+            if total <= self.max_bytes:
+                break
+            if sizes[folder]:
+                shutil.rmtree(folder, ignore_errors=True)
+                total -= sizes[folder]
+                removed += 1
+        if removed:
+            log.warning("results over their cap: removed %d folder(s) before they expired", removed)
 
     def _folder(self, name: str) -> Path | None:
         if not _FOLDER_RE.fullmatch(name):
@@ -491,6 +687,15 @@ class ResultStore:
         if target not in files:
             return JSONResponse({"error": "No such file."}, 404)
         return FileResponse(target, filename=target.name, content_disposition_type="attachment")
+
+
+def _size(folder: Path) -> int:
+    total = 0
+    for path in folder.rglob("*"):
+        with contextlib.suppress(OSError):
+            if path.is_file() and not path.is_symlink():
+                total += path.stat().st_size
+    return total
 
 
 def _visible_files(folder: Path) -> list[Path]:
@@ -522,6 +727,8 @@ class RemoteJob:
     deadline: float
     done: threading.Event = field(default_factory=threading.Event)
     finished: float | None = None
+    # The key the job runs on, to stop trusting it if the API refuses it mid-job.
+    token: str = ""
     raw: Any = None
     error: BaseException | None = None
     # The finished JobResult, built once on the first call that sees the job done.
@@ -551,6 +758,7 @@ class JobBoard:
         made: dict[str, str],
         timeout_s: float,
         cleanup: Callable[[], Any],
+        token: str = "",
     ) -> RemoteJob:
         """Run `fn` in its own thread, in a copy of the caller's context (so the SDK sees the
         caller's credentials), and return the job at once."""
@@ -564,6 +772,7 @@ class JobBoard:
             made=made,
             started=now,
             deadline=now + timeout_s,
+            token=token,
         )
         context = contextvars.copy_context()
 
@@ -609,6 +818,14 @@ class Remote:
     restore_sdk: Callable[[], None] | None = None
     # The stdio server's settings before remote mode replaced them (restored by tests).
     saved_settings: Any = None
+    # The token verifier in use (see `forget`).
+    verifier: Any = None
+
+    def forget(self, token: str | None) -> None:
+        """The API refused `token`: stop trusting it, so the next request gets a 401."""
+        forget = getattr(self.verifier, "forget", None)
+        if token and forget is not None:
+            forget(token)
 
     @classmethod
     def create(cls, settings: RemoteSettings) -> Remote:
@@ -617,7 +834,12 @@ class Remote:
         inputs.mkdir(parents=True, exist_ok=True)
         with contextlib.suppress(OSError):
             os.chmod(work, 0o700)
-        results = ResultStore(work / "results", settings.public_url, settings.results_ttl_s)
+        results = ResultStore(
+            work / "results",
+            settings.public_url,
+            settings.results_ttl_s,
+            max_bytes=settings.max_results_bytes,
+        )
         # Inputs left behind by a process that stopped mid-job are of no use to anyone.
         cutoff = time.time() - settings.results_ttl_s
         for folder in inputs.iterdir():
@@ -680,6 +902,9 @@ def build_app(server: Any, remote: Remote, verifier: TokenVerifier) -> Starlette
         # the 401's WWW-Authenticate header; without one there is nothing to point at.
         resource_server_url=f"{settings.public_url}{MCP_PATH}" if issuer else None,
         validate_token_resource=False if issuer else None,
+        # Published as the metadata's `scopes_supported` (Claude asks for what it lists) and
+        # required of every token. The verifier gives a user's own API key the scope too.
+        required_scopes=[OAUTH_SCOPE] if issuer else None,
     )
     public_host = urlsplit(settings.public_url).hostname or ""
     # Host/Origin checks only help a server that is reached on localhost; behind a public URL
@@ -696,7 +921,7 @@ def build_app(server: Any, remote: Remote, verifier: TokenVerifier) -> Starlette
 
     serve, methods = remote.results.serve, ["GET", "HEAD"]
     routes = [
-        Route("/healthz", health, methods=["GET"]),
+        Route(HEALTH_PATH, health, methods=["GET"]),
         Route(f"{FILES_PATH}/{{folder}}", serve, methods=methods),
         Route(f"{FILES_PATH}/{{folder}}/{{path:path}}", serve, methods=methods),
     ]

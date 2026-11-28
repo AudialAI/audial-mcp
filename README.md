@@ -213,6 +213,14 @@ It works differently from the local server:
 - **Long jobs don't hold the call open.** A job still running after 40 seconds returns
   `status: running` with a `job_id`. `check_job` takes that id and returns the result once
   the job is done. Only the account that started a job can check it.
+- **Sign-in keys from OAuth expire.** A key is trusted for up to 5 minutes, never past its
+  expiry. One with under 15 minutes left is refused with a 401, so the client refreshes it
+  before a job that runs on it. A key the API refuses mid-call is dropped, so the next request
+  gets the 401. Tokens need the `audial` scope; a user's own API key has it.
+- **ChatGPT hears no sales talk.** ChatGPT's plugin rules forbid plans, upgrades and checkout
+  links. When a call comes from ChatGPT (recognised by the client its sign-in was issued to,
+  the `_meta` ChatGPT adds to every call, or its user agent), a refusal says plainly that the
+  account has no runs left. Other clients get the usual wording.
 
 | Variable / option | Default |
 |---|---|
@@ -223,9 +231,12 @@ It works differently from the local server:
 | `AUDIAL_MCP_WAIT_S` (how long a call waits before returning a `job_id`) | `40` |
 | `AUDIAL_MCP_RESULTS_TTL_S` (how long download links last) | `86400` |
 | `AUDIAL_MCP_WORK_DIR` (downloaded inputs and results) | system temp folder |
+| `AUDIAL_MCP_MAX_RESULTS_MB` (past this, the oldest results go before they expire) | no cap |
+| `AUDIAL_MCP_DOMAIN_CHALLENGE` (the domain-verification token ChatGPT's plugin portal gives) | none |
 
 Jobs and results are kept by the process and its work folder, so run one instance.
-`GET /healthz` reports the version.
+`GET /healthz` reports the version. The hosted server at `https://mcp.audialmusic.ai` is
+deployed with `.do/app-mcp.yaml` (DigitalOcean App Platform).
 
 ## License
 

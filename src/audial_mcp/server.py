@@ -31,7 +31,7 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel, BeforeValidator, Field
 from starlette.applications import Starlette
 
-from audial_mcp import BOOT_ENV, __version__
+from audial_mcp import BOOT_ENV, __version__, plain
 from audial_mcp import remote as remote_mode
 from audial_mcp.config import (
     SIGN_IN_WAIT_S,
@@ -120,20 +120,28 @@ _API_FUNCTIONS = frozenset(STATUS_FUNCTIONS.values()) | frozenset(_ADDON_FUNCTIO
 SDK_WAIT_HEADROOM_S = 60
 
 # Every hint is set explicitly: ChatGPT requires readOnlyHint, destructiveHint and openWorldHint
-# as booleans, and an unset destructiveHint means "destructive" to MCP clients. The job tools
-# start work and write new results, but never delete or overwrite the user's data.
-REMOTE = ToolAnnotations(
+# as booleans, and an unset destructiveHint means "destructive" to MCP clients. OpenAI counts
+# "starting stateful jobs" and "uploading files" as writes, and a tool "confined to a bounded
+# private account" as closed-world (plugins/plugin-guidelines). tests/test_annotations.py holds
+# the decision for each tool.
+#
+# The job tools start work on Audial and write new results, but never delete or overwrite the
+# user's data. They are open-world because in remote mode they fetch whatever link they're given.
+JOB = ToolAnnotations(
     read_only_hint=False, destructive_hint=False, open_world_hint=True, idempotent_hint=False
 )
-READ_ONLY_REMOTE = ToolAnnotations(
-    read_only_hint=True, destructive_hint=False, open_world_hint=True
-)
+# Reads of the user's own Audial account or of Audial's service: nothing starts, nothing is sent.
+ACCOUNT_READ = ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False)
 LOCAL_READ_ONLY = ToolAnnotations(
     read_only_hint=True, destructive_hint=False, open_world_hint=False
 )
+# sign_in saves a key on this computer once the user approves it in their browser.
+SIGN_IN = ToolAnnotations(
+    read_only_hint=False, destructive_hint=False, open_world_hint=False, idempotent_hint=False
+)
 # sign_out revokes this computer's key: the one tool that undoes something.
 SIGN_OUT = ToolAnnotations(
-    read_only_hint=False, destructive_hint=True, open_world_hint=True, idempotent_hint=False
+    read_only_hint=False, destructive_hint=True, open_world_hint=False, idempotent_hint=False
 )
 
 # Set when the server runs with --http (see `create_http_app`); None for the stdio server.
@@ -235,8 +243,13 @@ def _tool_error(
 ) -> ToolError:
     """`to_tool_error`, with credentials scrubbed out of the message it produces.
 
-    Upstream error text can quote the request it failed on, which may carry the user id.
+    Upstream error text can quote the request it failed on, which may carry the user id. In
+    remote mode a key the API refused stops being trusted, so the caller's next request gets
+    the 401 that makes its client refresh or reconnect.
     """
+    if _remote is not None and isinstance(exc, AudialAuthError):
+        access = remote_mode.caller()
+        _remote.forget(access.token if access else None)
     error = to_tool_error(
         exc,
         tool=tool,
@@ -244,8 +257,16 @@ def _tool_error(
         api_key_from_env=bool(_settings.api_key),
         analysis_id=analysis_id,
         remote=_remote is not None,
+        chatgpt=_remote is not None and remote_mode.chatgpt_caller(),
     )
     return ToolError(_redact_text(str(error)))
+
+
+def _for_caller(value: Any) -> Any:
+    """A result as the caller may see it: for ChatGPT, with Audial's messages made plain."""
+    if _remote is not None and remote_mode.chatgpt_caller():
+        return plain.plain_result(value)
+    return value
 
 
 def _metadata(raw: Any) -> dict[str, Any]:
@@ -454,7 +475,7 @@ def _job_result(tool: str, raw: Any, output_dir: Path, elapsed: int) -> tuple[Jo
         execution_id=_execution_id(raw),
         output_dir=shown_dir,
         files=files,
-        metadata=_metadata(raw),
+        metadata=_for_caller(_metadata(raw)),
         summary=summary + note + advice,
     )
     return result, summary
@@ -567,6 +588,8 @@ async def _await_job(ctx: Context, job: remote_mode.RemoteJob) -> JobResult:
     elif job.error is not None:
         error = job.error
         _discard_if_empty(job.output_dir)
+        if isinstance(error, AudialAuthError):
+            _remote.forget(job.token)
     else:
         if job.result is None:
             elapsed = int((job.finished or time.monotonic()) - job.started)
@@ -606,6 +629,7 @@ async def _execute_remote(
         output_dir = remote.results.new_job_dir()
         job = remote.jobs.start(
             owner=owner.subject if owner else "",
+            token=owner.token if owner else "",
             tool=tool,
             output_dir=output_dir,
             fn=lambda: call(output_dir),
@@ -831,7 +855,7 @@ def _lyrics_metadata(result: Any) -> dict[str, Any]:
     return shaped
 
 
-@mcp.tool(title="Split stems", annotations=REMOTE)
+@mcp.tool(title="Split stems", annotations=JOB)
 async def stem_split(
     ctx: Context,
     file_path: FilePath,
@@ -880,13 +904,13 @@ async def stem_split(
     return await _execute(ctx, "stem_split", plan, relay=relay)
 
 
-@mcp.tool(title="Analyze audio", annotations=READ_ONLY_REMOTE)
+@mcp.tool(title="Analyze audio", annotations=JOB)
 async def analyze(ctx: Context, file_path: FilePath) -> JobResult:
     """Analyze a track: BPM, key, loudness and other characteristics.
 
     Use this first whenever the user asks for tempo, key or loudness. It is the fastest tool
-    (seconds), does not count as a run, and changes nothing. The answer is in `metadata` and
-    the same data is saved to the results folder.
+    (seconds) and does not count as a run. It uploads the file to Audial; the source is
+    unchanged. The answer is in `metadata` and the same data is saved to the results folder.
     """
     relay = ProgressRelay()
 
@@ -899,7 +923,7 @@ async def analyze(ctx: Context, file_path: FilePath) -> JobResult:
     return await _execute(ctx, "analyze", plan, relay=relay)
 
 
-@mcp.tool(title="Segment audio", annotations=REMOTE)
+@mcp.tool(title="Segment audio", annotations=JOB)
 async def segment(
     ctx: Context,
     file_path: FilePath,
@@ -958,7 +982,7 @@ async def segment(
     return await _execute(ctx, "segment", plan, relay=relay)
 
 
-@mcp.tool(title="Audio features", annotations=REMOTE)
+@mcp.tool(title="Audio features", annotations=JOB)
 async def audio_features(
     ctx: Context,
     analysis_id: AnalysisId = None,
@@ -979,7 +1003,7 @@ async def audio_features(
     return await _addon(ctx, "audio_features", "audio_features", analysis_id, file_path, _as_dict)
 
 
-@mcp.tool(title="Tag audio", annotations=REMOTE)
+@mcp.tool(title="Tag audio", annotations=JOB)
 async def tag_audio(
     ctx: Context,
     analysis_id: AnalysisId = None,
@@ -997,7 +1021,7 @@ async def tag_audio(
     return await _addon(ctx, "tag_audio", "tags", analysis_id, file_path, _as_dict)
 
 
-@mcp.tool(title="Get lyrics", annotations=REMOTE)
+@mcp.tool(title="Get lyrics", annotations=JOB)
 async def get_lyrics(
     ctx: Context,
     analysis_id: AnalysisId = None,
@@ -1016,7 +1040,7 @@ async def get_lyrics(
     return await _addon(ctx, "get_lyrics", "lyrics", analysis_id, file_path, _lyrics_metadata)
 
 
-@mcp.tool(title="Master a track", annotations=REMOTE)
+@mcp.tool(title="Master a track", annotations=JOB)
 async def master(
     ctx: Context,
     file_path: FilePath,
@@ -1055,7 +1079,7 @@ async def master(
     return await _execute(ctx, "master", plan, relay=relay)
 
 
-@mcp.tool(title="Generate a sample pack", annotations=REMOTE)
+@mcp.tool(title="Generate a sample pack", annotations=JOB)
 async def generate_samples(
     ctx: Context,
     file_path: Annotated[
@@ -1107,7 +1131,7 @@ async def generate_samples(
     return await _execute(ctx, "generate_samples", plan, relay=relay)
 
 
-@mcp.tool(title="Audio to MIDI", annotations=REMOTE)
+@mcp.tool(title="Audio to MIDI", annotations=JOB)
 async def generate_midi(
     ctx: Context,
     file_path: FilePath,
@@ -1136,7 +1160,7 @@ async def generate_midi(
     return await _execute(ctx, "generate_midi", plan, relay=relay)
 
 
-@mcp.tool(title="Generate music", annotations=REMOTE)
+@mcp.tool(title="Generate music", annotations=JOB)
 async def generate_music(
     ctx: Context,
     prompt: Annotated[
@@ -1268,7 +1292,7 @@ async def generate_music(
     return await _execute(ctx, "generate_music", plan, relay=relay)
 
 
-@mcp.tool(title="Resynthesize a one-shot into a synth preset", annotations=REMOTE)
+@mcp.tool(title="Resynthesize a one-shot into a synth preset", annotations=JOB)
 async def sound2vital(
     ctx: Context,
     file_path: Annotated[
@@ -1301,7 +1325,7 @@ async def sound2vital(
     return await _execute(ctx, "sound2vital", plan, relay=relay)
 
 
-@mcp.tool(title="Resynthesize a one-shot into a Serum 2 preset", annotations=REMOTE)
+@mcp.tool(title="Resynthesize a one-shot into a Serum 2 preset", annotations=JOB)
 async def sound2serum(
     ctx: Context,
     file_path: Annotated[
@@ -1334,13 +1358,18 @@ async def sound2serum(
     return await _execute(ctx, "sound2serum", plan, relay=relay)
 
 
-@mcp.tool(title="Sing lyrics in a reference voice", annotations=REMOTE)
+@mcp.tool(title="Sing lyrics in a reference voice", annotations=JOB)
 async def text2vox(
     ctx: Context,
     reference_file: Annotated[
         str,
         FileArg,
-        Field(description="Short clip of the reference voice (timbre)."),
+        Field(
+            description=(
+                "Short clip of the reference voice (timbre). It must be the user's own voice, or "
+                "one whose owner has given consent; the user is responsible for that."
+            )
+        ),
     ],
     lyrics: Annotated[
         str,
@@ -1426,6 +1455,9 @@ async def text2vox(
 ) -> JobResult:
     """Synthesize a sung vocal (and MIDI) from lyrics, a melody and a reference voice.
 
+    The reference voice must be the user's own, or one whose owner has given consent: the user is
+    responsible for that. Do not use it to imitate a real person who has not agreed.
+
     Needs both a reference clip of the voice and a melody, as MIDI or audio. A MIDI melody must be
     one note at a time: a single melody line, not chords or harmony. lyrics_mode decides
     how the lyrics are lined up with the melody's notes; "per_note" is the one that gives exact
@@ -1471,7 +1503,7 @@ async def text2vox(
     return await _execute(ctx, "text2vox", plan, relay=relay)
 
 
-@mcp.tool(title="Service status", annotations=READ_ONLY_REMOTE)
+@mcp.tool(title="Service status", annotations=ACCOUNT_READ)
 async def service_status(
     ctx: Context,
     tool: Annotated[
@@ -1510,7 +1542,7 @@ async def service_status(
         function = _ADDON_FUNCTIONS.get(tool, tool) if tool is not None else None
         doc = await anyio.to_thread.run_sync(lambda: audial.status(function))
         if not isinstance(doc, dict):
-            return {"result": _redact(doc)}
+            return _for_caller({"result": _redact(doc)})
 
         result: dict[str, Any] = _redact(doc)
         cold = [
@@ -1531,12 +1563,12 @@ async def service_status(
             )
             result["cold"] = cold
             result["notice"] = audial.warmup.cold_start_message(coldest)
-        return result
+        return _for_caller(result)
     except Exception as exc:  # noqa: BLE001 — every failure becomes a ToolError
         raise _tool_error(exc, tool="service_status") from None
 
 
-@mcp.tool(title="API usage", annotations=READ_ONLY_REMOTE)
+@mcp.tool(title="API usage", annotations=ACCOUNT_READ)
 async def usage(ctx: Context) -> dict[str, Any]:
     """This month's Audial API usage: plan, monthly limit, calls used and left, and the reset time.
 
@@ -1551,6 +1583,8 @@ async def usage(ctx: Context) -> dict[str, Any]:
         block = await anyio.to_thread.run_sync(audial.usage)
         if not isinstance(block, dict):
             return {"usage": None, "notice": "Audial reported no API usage for this account."}
+        if _remote is not None and remote_mode.chatgpt_caller():
+            return plain.plain_usage(_redact(block))
         return _redact(block)
     except Exception as exc:  # noqa: BLE001 — every failure becomes a ToolError
         raise _tool_error(exc, tool="usage") from None
@@ -1561,7 +1595,7 @@ async def usage(ctx: Context) -> dict[str, Any]:
 _PIPELINE_ID_RE = _ID_RE
 
 
-@mcp.tool(title="Pipeline status", annotations=READ_ONLY_REMOTE)
+@mcp.tool(title="Pipeline status", annotations=ACCOUNT_READ)
 async def pipeline_status(
     ctx: Context,
     pipeline_id: Annotated[
@@ -1589,7 +1623,9 @@ async def pipeline_status(
             )
         await _apply_credentials(ctx)
         status = await anyio.to_thread.run_sync(lambda: audial.pipelines.get(pipeline_id))
-        return _redact(status) if isinstance(status, dict) else {"result": _redact(status)}
+        return _for_caller(
+            _redact(status) if isinstance(status, dict) else {"result": _redact(status)}
+        )
     except Exception as exc:  # noqa: BLE001 — every failure becomes a ToolError
         raise _tool_error(exc, tool="pipeline_status") from None
 
@@ -1679,7 +1715,7 @@ async def account() -> Account:
         raise _tool_error(exc, tool="account") from None
 
 
-@mcp.tool(title="Sign in to Audial", annotations=REMOTE)
+@mcp.tool(title="Sign in to Audial", annotations=SIGN_IN)
 async def sign_in(
     ctx: Context,
     switch_account: Annotated[
@@ -1737,6 +1773,12 @@ REMOTE_FILE_NOTE = (
 
 # Tools whose local description would be wrong for a remote caller.
 REMOTE_DESCRIPTIONS = {
+    "usage": (
+        "How many Audial runs the connected account has used this month, how many are left, and "
+        "when the count resets (`resetsAt`, milliseconds since the epoch; null before the first "
+        "run this period). Use when the user asks how many runs they have left. Reading this "
+        "does not count as a run."
+    ),
     "account": (
         "Show which Audial account this connection uses, by its email. Use when a tool reports "
         "a credentials problem or the user asks which account is in use."
@@ -1759,10 +1801,10 @@ def _remote_instructions(settings: remote_mode.RemoteSettings) -> str:
         "wait a few minutes after a new analysis while its stems are made. Audial's workers "
         "scale to zero, so the first job after an idle period spends extra time starting one: "
         "that shows up as a 'Warming up the machine' line, worth relaying as the reason for "
-        "the wait; service_status says in advance which tools are warm. If a tool reports "
-        "that the account's plan does not cover a run, pass that on as it is. "
+        "the wait; service_status says in advance which tools are warm. If a tool says the "
+        "account has no runs left, pass that on as it is. "
         "Only use audio the user has the rights to, and for text2vox a reference voice that is "
-        "the user's own or one they have permission to use. "
+        "the user's own or one whose owner has given consent. "
         "sound2vital and sound2serum model one isolated sound: a loop, melody or drum pattern "
         "gives a poor preset, so say so before running one and suggest trimming it to one "
         "note. After either tool, relay anything in `summary` about the match."
@@ -1805,7 +1847,7 @@ def _remote_tool(tool: Tool, settings: remote_mode.RemoteSettings) -> Tool:
         meta["openai/fileParams"] = files
     if settings.authorization_server:
         # Every tool needs the user's account (OpenAI reads the `_meta` mirror of this field).
-        meta["securitySchemes"] = [{"type": "oauth2", "scopes": []}]
+        meta["securitySchemes"] = [{"type": "oauth2", "scopes": [remote_mode.OAUTH_SCOPE]}]
     description = REMOTE_DESCRIPTIONS.get(tool.name, tool.description)
     return tool.model_copy(
         update={"parameters": params, "meta": meta or None, "description": description}
@@ -1836,13 +1878,34 @@ def create_http_app(
     remote.saved_settings = _settings
     _settings = replace(_settings, api_key=None, user_id=None, results_dir=remote.results.root)
     _remote = remote
+    server = _remote_server(settings)
+    verifier = verifier or remote_mode.AudialKeyVerifier(
+        resource=f"{settings.public_url}{remote_mode.MCP_PATH}"
+    )
+    remote.verifier = verifier
+    return remote_mode.build_app(server, remote, verifier)
 
+
+class _RemoteServer(MCPServer):
+    """The remote `MCPServer`: each tool call knows whether ChatGPT is the caller."""
+
+    async def call_tool(self, name: str, arguments: dict[str, Any], context: Any = None) -> Any:
+        with remote_mode.serving_call(context):
+            return await super().call_tool(name, arguments, context)
+
+
+def _remote_server(settings: remote_mode.RemoteSettings) -> MCPServer:
+    """The remote server's own `MCPServer`: copies of the shared tools, plus `check_job`.
+
+    Building it changes nothing in this process; `create_http_app` is what switches to remote
+    mode.
+    """
     tools = [
         _remote_tool(tool, settings)
         for tool in mcp._tool_manager.list_tools()  # noqa: SLF001 (the Tool objects, not wire copies)
         if tool.name not in LOCAL_ONLY_TOOLS
     ]
-    server = MCPServer(
+    server = _RemoteServer(
         "audial",
         instructions=_remote_instructions(settings),
         version=__version__,
@@ -1861,12 +1924,12 @@ def create_http_app(
             read_only_hint=True, destructive_hint=False, open_world_hint=False, idempotent_hint=True
         ),
         meta=(
-            {"securitySchemes": [{"type": "oauth2", "scopes": []}]}
+            {"securitySchemes": [{"type": "oauth2", "scopes": [remote_mode.OAUTH_SCOPE]}]}
             if settings.authorization_server
             else None
         ),
     )
-    return remote_mode.build_app(server, remote, verifier or remote_mode.AudialKeyVerifier())
+    return server
 
 
 def disable_remote() -> None:
@@ -1959,7 +2022,9 @@ def _serve_http(args: argparse.Namespace) -> None:
         log.error("configuration error; every tool call will return it: %s", _startup_error)
     app = create_http_app(settings)
     log.info("audial-mcp %s over streamable HTTP: %s", __version__, remote_mode.describe(settings))
-    uvicorn.run(app, host=settings.host, port=settings.port, log_level="info")
+    # No access log: it would write each download link (whose folder name is its secret) and
+    # each caller's address to the host's logs. The server logs what it does itself.
+    uvicorn.run(app, host=settings.host, port=settings.port, log_level="info", access_log=False)
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "audial-mcp"
-version = "0.10.0"
+version = "0.11.0"
 description = "MCP server for Audial: stem splitting, song analysis with audio features, tags and timed lyrics, mastering, MIDI, music generation, resynthesis to Vital or Serum 2, and vocal synthesis from any MCP client."
 readme = "README.md"
 license = "MIT"
@@ -37,15 +37,22 @@ Repository = "https://github.com/AudialAI/audial-mcp"
 audial-mcp = "audial_mcp.server:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "anyio>=4", "ruff>=0.6", "build>=1.2"]
+dev = [
+    "pytest>=8",
+    "anyio>=4",
+    "ruff>=0.6",
+    "build>=1.2",
+    "pyyaml>=6",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/audial_mcp"]
 
 # The sdist ships the package and its metadata, not the project's working notes: docs/ is
-# design and checklist material, .github/ is CI, .superpowers/ is planning scratch.
+# design and checklist material, .github/ is CI, .do/ is the hosted server's deployment,
+# .superpowers/ is planning scratch.
 [tool.hatch.build.targets.sdist]
-exclude = ["docs", ".github", ".superpowers"]
+exclude = ["docs", ".github", ".do", ".superpowers"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

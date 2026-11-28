@@ -16,3 +16,25 @@ jobs:
       - run: uv sync --group dev
       - run: uv run ruff check . && uv run ruff format --check .
       - run: uv run pytest -q
+  # The image App Platform builds for https://mcp.audialmusic.ai (.do/app-mcp.yaml): it must
+  # build from uv.lock and answer its health check and an unauthenticated call as deployed.
+  remote-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f .do/remote.Dockerfile -t audial-mcp-remote .
+      - name: Serves its health check and asks for sign-in
+        run: |
+          docker run -d --name mcp -p 8080:8080 \
+            -e AUDIAL_MCP_PUBLIC_URL=https://mcp.audialmusic.ai \
+            -e AUDIAL_MCP_AUTHORIZATION_SERVER=https://api.audialmusic.ai \
+            audial-mcp-remote
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8080/healthz && break; sleep 1; done
+          curl -fsS http://127.0.0.1:8080/healthz | grep -q '"ok":true'
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' \
+            --data '{}' http://127.0.0.1:8080/mcp)
+          test "$code" = 401
+          curl -fsS http://127.0.0.1:8080/.well-known/oauth-protected-resource/mcp \
+            | grep -q '"resource":"https://mcp.audialmusic.ai/mcp"'
+      - if: always()
+        run: docker logs mcp || true

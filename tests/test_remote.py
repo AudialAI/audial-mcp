@@ -21,7 +21,12 @@ import audial
 import httpx2
 import pytest
 from audial.api import auth as sdk_auth
-from audial.api.exceptions import AudialAuthError, AudialError, SubscriptionRequiredError
+from audial.api.exceptions import (
+    AudialAuthError,
+    AudialError,
+    AudialLimitReached,
+    SubscriptionRequiredError,
+)
 from audial.utils import config as sdk_config
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
@@ -32,9 +37,10 @@ from pydantic import BeforeValidator
 from requests.structures import CaseInsensitiveDict
 
 import audial_mcp.server as server_mod
+from audial_mcp import plain
 from audial_mcp import remote as remote_mode
 from audial_mcp.config import Settings
-from audial_mcp.errors import REMOTE_SUBSCRIPTION_REQUIRED
+from audial_mcp.errors import REMOTE_AUTH_REJECTED, REMOTE_SUBSCRIPTION_REQUIRED
 from audial_mcp.validation import ValidationError
 
 PUBLIC = "https://mcp.example.test"
@@ -69,7 +75,11 @@ TOOLS = {
 def access(key: str) -> AccessToken:
     user_id, email = ACCOUNTS[key]
     return AccessToken(
-        token=key, client_id="audial-api-key", scopes=[], subject=user_id, claims={"email": email}
+        token=key,
+        client_id="audial-api-key",
+        scopes=["audial"],
+        subject=user_id,
+        claims={"email": email},
     )
 
 
@@ -466,8 +476,9 @@ async def serving(settings):
 
 
 @asynccontextmanager
-async def connect(app, key: str | None):
+async def connect(app, key: str | None, extra_headers: dict[str, str] | None = None):
     headers = {"Authorization": f"Bearer {key}"} if key else {}
+    headers.update(extra_headers or {})
     transport = httpx2.ASGITransport(app=app)
     async with httpx2.AsyncClient(transport=transport, base_url=PUBLIC, headers=headers) as http:
         async with Client(streamable_http_client(f"{PUBLIC}/mcp", http_client=http)) as client:
@@ -521,9 +532,13 @@ async def test_an_authorization_server_is_published_for_oauth_clients(tmp_path, 
         prm = (await http.get("/.well-known/oauth-protected-resource/mcp")).json()
         assert prm["resource"] == f"{PUBLIC}/mcp"
         assert prm["authorization_servers"] == ["https://auth.example.test"]
+        # Claude asks for the scopes listed here; the API defines one, "audial".
+        assert prm["scopes_supported"] == ["audial"]
     async with serving(settings) as app, connect(app, KEY_A) as (client, _):
         tools = (await client.list_tools()).tools
-        assert all(t.meta["securitySchemes"] == [{"type": "oauth2", "scopes": []}] for t in tools)
+        assert all(
+            t.meta["securitySchemes"] == [{"type": "oauth2", "scopes": ["audial"]}] for t in tools
+        )
 
 
 @pytest.mark.anyio
@@ -763,3 +778,294 @@ def test_result_store_expires_folders(tmp_path):
     store.sweep()
     assert fresh.exists() and not stale.exists()
     assert store.url_for(fresh / "my song.wav") == f"{PUBLIC}/files/{fresh.name}/my%20song.wav"
+
+
+# --- ChatGPT: no plans, upgrades or checkout -------------------------------------------------
+
+# What ChatGPT puts in every tool call's `_meta` (plugins/reference).
+CHATGPT_META = {"openai/subject": "v1/anon", "openai/locale": "en-US", "openai/session": "s1"}
+SALES_WORDS = ("subscri", "upgrad", "pricing", "checkout", "top-up", "topup", "trial", "purchase")
+
+
+def error_text(result) -> str:
+    """A failed call's message, without the SDK's "Error executing tool <name>: " prefix."""
+    assert result.is_error
+    text = result.content[0].text
+    return text.split(": ", 1)[1] if text.startswith("Error executing tool ") else text
+
+
+@pytest.mark.anyio
+async def test_chatgpt_is_told_plainly_that_the_account_has_no_runs_left(
+    tmp_path, stdio_settings, web, monkeypatch
+):
+    web.pages["https://files.example.test/f/1"] = FakeResponse(body=WAV)
+    fake_job(monkeypatch, "stem_split", raises=SubscriptionRequiredError())
+    resets = AudialLimitReached(
+        limit=100, used=100, resets_at=None, upgrade_url="https://audialmusic.ai/product/pricing"
+    )
+    fake_job(monkeypatch, "master", raises=resets)
+    args = {"file_path": attached()}
+    async with serving(settings_for(tmp_path)) as app:
+        async with connect(app, KEY_A) as (client, _):
+            chatgpt = await client.call_tool("stem_split", args, meta=CHATGPT_META)
+            assert error_text(chatgpt) == plain.NO_RUNS_LEFT
+            text = error_text(await client.call_tool("master", args, meta=CHATGPT_META))
+            assert "this month's runs" in text and "http" not in text
+            assert not any(word in text.lower() for word in SALES_WORDS), text
+            # The same calls from a client that is not ChatGPT keep the remote wording.
+            claude = await client.call_tool("stem_split", args)
+            assert error_text(claude) == REMOTE_SUBSCRIPTION_REQUIRED
+            other = await client.call_tool("master", args)
+            assert error_text(other).startswith("Monthly API limit reached")
+        # ChatGPT's user agent alone is enough, in case a call comes without `_meta`.
+        ua = {"User-Agent": "openai-mcp/1.0.0"}
+        async with connect(app, KEY_A, ua) as (client, _):
+            by_agent = await client.call_tool("stem_split", args)
+            assert error_text(by_agent) == plain.NO_RUNS_LEFT
+
+
+@pytest.mark.anyio
+async def test_chatgpt_results_carry_no_sales_wording(tmp_path, stdio_settings, monkeypatch):
+    block = {
+        "plan": "creator",
+        "monthlyLimit": 100,
+        "used": 98,
+        "remaining": 2,
+        "topupRemaining": 5,
+        "resetsAt": 1798000000000,
+    }
+    monkeypatch.setattr(audial, "usage", lambda: dict(block))
+    refused = {
+        "state": "failed",
+        "error": {"message": "Subscribe at audialmusic.ai and try again.", "step": "stems"},
+    }
+    monkeypatch.setattr(audial.pipelines, "get", lambda _id: dict(refused))
+    async with serving(settings_for(tmp_path)) as app, connect(app, KEY_A) as (client, _):
+        usage = (await client.call_tool("usage", {}, meta=CHATGPT_META)).structured_content
+        assert usage == {"monthlyLimit": 100, "used": 98, "remaining": 7, "resetsAt": 1798000000000}
+        status = await client.call_tool("pipeline_status", {"pipeline_id": "p1"}, meta=CHATGPT_META)
+        assert status.structured_content["error"]["message"] == plain.NO_RUNS_LEFT
+        # Other clients see the account's block as the API returns it.
+        assert (await client.call_tool("usage", {})).structured_content == block
+
+
+@pytest.mark.anyio
+async def test_no_remote_description_or_instruction_talks_about_buying(tmp_path, stdio_settings):
+    async with serving(settings_for(tmp_path)) as app, connect(app, KEY_A) as (client, _):
+        texts = [client.instructions]
+        for tool in (await client.list_tools()).tools:
+            texts += [tool.title, tool.description, json.dumps(tool.input_schema)]
+    for text in texts:
+        lowered = text.lower()
+        assert not [w for w in SALES_WORDS if w in lowered], text
+        assert " plan " not in lowered and "plan," not in lowered, text
+
+
+@pytest.mark.anyio
+async def test_tool_call_streams_are_not_buffered(tmp_path, stdio_settings):
+    """App Platform and other proxies hold a response back unless it says not to."""
+    call = {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "check_job", "arguments": {"job_id": "nope"}}}  # fmt: skip
+    headers = {**MCP_HEADERS, "authorization": f"Bearer {KEY_A}",
+               "mcp-protocol-version": "2025-06-18"}  # fmt: skip
+    async with serving(settings_for(tmp_path)) as app, raw_http(app) as http:
+        answer = await http.post("/mcp", json=call, headers=headers)
+    assert answer.status_code == 200
+    assert answer.headers["content-type"].startswith("text/event-stream")
+    assert answer.headers.get("x-accel-buffering") == "no"
+    assert "no-transform" in answer.headers.get("cache-control", "")
+
+
+# --- what the token says about the caller ----------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_verifier_keeps_the_oauth_client_and_checks_the_audience():
+    resource = "https://mcp.example.test/mcp"
+    answers = {
+        KEY_A: {"user_id": "user-a", "token_type": "oauth", "scope": "audial",
+                "client_id": "https://chatgpt.com/oauth/client.json", "client_name": "ChatGPT",
+                "resource": resource},
+        KEY_B: {"user_id": "user-b", "token_type": "oauth",
+                "resource": "https://elsewhere.example.test/mcp"},
+    }  # fmt: skip
+    verifier = remote_mode.AudialKeyVerifier(answers.__getitem__, resource=resource)
+    a = await verifier.verify_token(KEY_A)
+    assert a.client_id == "https://chatgpt.com/oauth/client.json"
+    assert a.claims["client_name"] == "ChatGPT" and a.resource == resource
+    # Issued for another server: not a token for this one.
+    assert await verifier.verify_token(KEY_B) is None
+    # A plain API key carries no audience and no client, and is still accepted.
+    plain_key = remote_mode.AudialKeyVerifier(lambda _k: {"user_id": "u"}, resource=resource)
+    token = await plain_key.verify_token(KEY_A)
+    assert token.subject == "u" and token.client_id == "audial-api-key" and token.resource is None
+    # The origin alone, or a trailing slash, names the same server.
+    for alias in ("https://mcp.example.test", "https://mcp.example.test/mcp/"):
+        same = remote_mode.AudialKeyVerifier(
+            lambda _k, alias=alias: {"user_id": "u", "token_type": "oauth", "resource": alias},
+            resource=resource,
+        )
+        assert (await same.verify_token(KEY_A)) is not None, alias
+    # A user's own API key isn't an OAuth token: the audience check doesn't apply to it.
+    own = remote_mode.AudialKeyVerifier(
+        lambda _k: {"user_id": "u", "resource": "https://elsewhere.example.test/mcp"},
+        resource=resource,
+    )
+    assert (await own.verify_token(KEY_A)) is not None
+
+
+def test_result_store_stays_under_its_size_cap(tmp_path):
+    """App Platform replaces a container whose 4 GiB disk fills up, losing every job and link,
+    so the oldest finished results go first once the store is over its cap."""
+    store = remote_mode.ResultStore(tmp_path / "results", PUBLIC, ttl_s=3600, max_bytes=2500)
+    now = time.time()
+    folders = []
+    for age, size in ((300, 1000), (200, 1000), (100, 1000)):
+        folder = store.new_job_dir()
+        (folder / "a.wav").write_bytes(b"x" * size)
+        os.utime(folder, (now - age, now - age))
+        folders.append(folder)
+    running = store.new_job_dir()  # a job that has written nothing yet
+    os.utime(running, (now - 400, now - 400))
+    store.sweep()
+    oldest, middle, newest = folders
+    assert not oldest.exists() and middle.exists() and newest.exists()
+    assert running.exists()
+
+
+def test_the_results_cap_comes_from_the_environment(tmp_path):
+    def cap(**env):
+        return remote_mode.remote_settings(
+            host=None, port=None, public_url=None, authorization_server=None, env=env
+        ).max_results_bytes
+
+    assert cap() is None
+    assert cap(AUDIAL_MCP_MAX_RESULTS_MB="2500") == 2500 * 1024 * 1024
+    with pytest.raises(ValueError):
+        cap(AUDIAL_MCP_MAX_RESULTS_MB="lots")
+    work = tmp_path / "work"
+    settings = remote_mode.remote_settings(
+        host=None,
+        port=None,
+        public_url=PUBLIC,
+        authorization_server=None,
+        env={"AUDIAL_MCP_WORK_DIR": str(work), "AUDIAL_MCP_MAX_RESULTS_MB": "1"},
+    )
+    assert remote_mode.Remote.create(settings).results.max_bytes == 1024 * 1024
+
+
+def test_the_access_log_is_off_so_download_links_stay_out_of_logs(monkeypatch, tmp_path):
+    """uvicorn's access log would write every /files/<secret folder>/... path, and the
+    caller's address, to the platform's logs."""
+    import uvicorn
+
+    seen = {}
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: seen.update(kwargs))
+    monkeypatch.setattr(server_mod, "create_http_app", lambda settings: object())
+    monkeypatch.setattr(server_mod, "BOOT_ENV", {"AUDIAL_MCP_WORK_DIR": str(tmp_path)})
+    server_mod._serve_http(server_mod._parse_args(["--http", "--port", "9010"]))
+    assert seen["port"] == 9010 and seen["access_log"] is False
+
+
+# --- OAuth tokens expire (W1: 1 h, with rotating refresh tokens) -----------------------------
+
+
+class Clock:
+    def __init__(self, now: float = 1_800_000_000.0):
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def oauth_whoami(calls: list, expires_at: float, **extra):
+    def whoami(key):
+        calls.append(key)
+        return {"user_id": "user-a", "token_type": "oauth", "scope": "audial",
+                "expires_at": expires_at, **extra}  # fmt: skip
+
+    return whoami
+
+
+@pytest.mark.anyio
+async def test_an_oauth_token_is_cached_no_longer_than_it_lives():
+    clock, calls = Clock(), []
+    expires = clock.now + 1000
+    verifier = remote_mode.AudialKeyVerifier(
+        oauth_whoami(calls, expires), clock=clock, min_lifetime_s=0
+    )
+    token = await verifier.verify_token(KEY_A)
+    assert token.expires_at == int(expires) and token.scopes == ["audial"]
+    clock.now += 299
+    assert await verifier.verify_token(KEY_A) is not None and len(calls) == 1
+    clock.now += 2  # past the 5 minutes: asked again
+    assert await verifier.verify_token(KEY_A) is not None and len(calls) == 2
+    # A token about to expire is cached only until it expires, not for 5 more minutes.
+    short = remote_mode.AudialKeyVerifier(
+        oauth_whoami(calls := [], clock.now + 60), clock=clock, min_lifetime_s=0
+    )
+    await short.verify_token(KEY_A)
+    clock.now += 61
+    # Expired: refused (401, so the client refreshes) without being trusted from the cache.
+    assert await short.verify_token(KEY_A) is None
+
+
+@pytest.mark.anyio
+async def test_a_token_too_close_to_expiry_for_a_job_is_refused_so_the_client_refreshes():
+    """A job runs on the token it started with for up to 15 minutes; a token that would expire
+    mid-job is refused up front (401), and ChatGPT or Claude refresh it."""
+    clock, calls = Clock(), []
+    verifier = remote_mode.AudialKeyVerifier(oauth_whoami(calls, clock.now + 3600), clock=clock)
+    assert await verifier.verify_token(KEY_A) is not None
+    clock.now += 3600 - remote_mode.OAUTH_MIN_LIFETIME_S + 1
+    assert await verifier.verify_token(KEY_A) is None
+    # The margin never makes a freshly issued 1 h token unusable.
+    assert remote_mode.OAUTH_MIN_LIFETIME_S <= 15 * 60
+
+
+@pytest.mark.anyio
+async def test_forget_drops_a_cached_token_so_the_api_is_asked_again():
+    calls = []
+    verifier = remote_mode.AudialKeyVerifier(lambda key: calls.append(key) or {"user_id": "user-a"})
+    await verifier.verify_token(KEY_A)
+    await verifier.verify_token(KEY_A)
+    verifier.forget(KEY_A)
+    await verifier.verify_token(KEY_A)
+    assert calls == [KEY_A, KEY_A]
+    verifier.forget("never seen")  # nothing to drop is fine
+
+
+@pytest.mark.anyio
+async def test_an_api_refusal_turns_the_next_request_into_a_401(
+    tmp_path, stdio_settings, web, monkeypatch
+):
+    """The call in flight has already answered 200 (its event stream started), so it says
+    what happened; the token leaves the cache, and the next request gets the 401 with
+    WWW-Authenticate that makes ChatGPT and Claude refresh the token."""
+    web.pages["https://files.example.test/f/1"] = FakeResponse(body=WAV)
+    refused = {"now": False}
+
+    def whoami(key):
+        if refused["now"]:
+            raise AudialAuthError("Authentication failed: 403")
+        return {"user_id": "user-a", "email": "a@example.test"}
+
+    def stem_split(**_kwargs):
+        refused["now"] = True  # the API stopped accepting the token mid-call
+        raise AudialAuthError("Authentication failed: 403")
+
+    monkeypatch.setattr(server_mod.audial, "stem_split", stem_split)
+    settings = settings_for(tmp_path, authorization_server="https://auth.example.test")
+    app = server_mod.create_http_app(settings, remote_mode.AudialKeyVerifier(whoami))
+    try:
+        async with app.router.lifespan_context(app):
+            async with connect(app, KEY_A) as (client, _):
+                failed = await client.call_tool("stem_split", {"file_path": attached()})
+                assert error_text(failed) == REMOTE_AUTH_REJECTED
+            async with raw_http(app) as http:
+                headers = {**MCP_HEADERS, "authorization": f"Bearer {KEY_A}"}
+                again = await http.post("/mcp", json=LIST, headers=headers)
+            assert again.status_code == 401
+            assert "resource_metadata=" in again.headers["www-authenticate"]
+    finally:
+        server_mod.disable_remote()

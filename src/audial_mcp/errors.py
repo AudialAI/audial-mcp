@@ -13,6 +13,7 @@ from audial.api.exceptions import (
 )
 from mcp.server.mcpserver.exceptions import ToolError
 
+from audial_mcp import plain
 from audial_mcp.config import ConfigError
 from audial_mcp.jobs import JobTimeout
 from audial_mcp.validation import ValidationError
@@ -91,9 +92,25 @@ REMOTE_SUBSCRIPTION_REQUIRED = (
     "subscription, or the account's free runs are used up."
 )
 REMOTE_AUTH_REJECTED = (
-    "Audial did not accept the credentials this connection uses. Reconnect Audial (or check "
-    "the API key) and try again."
+    "Audial did not accept this connection's sign-in: it may have expired or been disconnected. "
+    "Try again, and the app signs in again by itself; if it still fails, reconnect Audial (or "
+    "check the API key)."
 )
+
+
+def _out_of_runs(exc: BaseException) -> bool:
+    """The API refused the run because the account's free runs are used up (HTTP 402).
+
+    The SDK raises SubscriptionRequiredError for a refused call, but a pipeline refused at one
+    of its steps comes back as a plain AudialError carrying the code and the API's words.
+    """
+    if isinstance(exc, SubscriptionRequiredError):
+        return True
+    if not isinstance(exc, AudialError) or isinstance(exc, AudialLimitReached):
+        return False
+    return getattr(exc, "code", None) == "SUBSCRIPTION_REQUIRED" or (
+        "(SUBSCRIPTION_REQUIRED)" in str(exc)
+    )
 
 
 def to_tool_error(
@@ -104,14 +121,41 @@ def to_tool_error(
     api_key_from_env: bool = False,
     analysis_id: str | None = None,
     remote: bool = False,
+    chatgpt: bool = False,
 ) -> ToolError:
     """`analysis_id` is set when the tool analysed a file before the step that failed.
 
     `remote`: the server is serving remote callers (`--http`), whose credentials come with
     each request and who have no local configuration or browser sign-in to fix.
+
+    `chatgpt`: the caller is ChatGPT, which must not be shown plans, upgrades or checkout links;
+    refusals say plainly that the account has no runs left (see `audial_mcp.plain`).
     """
-    if remote and isinstance(exc, SubscriptionRequiredError):
-        return ToolError(REMOTE_SUBSCRIPTION_REQUIRED)
+    remote = remote or chatgpt
+    if remote and _out_of_runs(exc):
+        return ToolError(plain.NO_RUNS_LEFT if chatgpt else REMOTE_SUBSCRIPTION_REQUIRED)
+    if chatgpt and isinstance(exc, AudialLimitReached):
+        return ToolError(plain.no_runs_this_month(exc))
+    error = _to_tool_error(
+        exc,
+        tool=tool,
+        execution_id=execution_id,
+        api_key_from_env=api_key_from_env,
+        analysis_id=analysis_id,
+        remote=remote,
+    )
+    return ToolError(plain.plain_text(str(error))) if chatgpt else error
+
+
+def _to_tool_error(
+    exc: BaseException,
+    *,
+    tool: str,
+    execution_id: str | None,
+    api_key_from_env: bool,
+    analysis_id: str | None,
+    remote: bool,
+) -> ToolError:
     if remote and isinstance(exc, AudialAuthError):
         return ToolError(REMOTE_AUTH_REJECTED)
     if isinstance(exc, AudialLimitReached):
